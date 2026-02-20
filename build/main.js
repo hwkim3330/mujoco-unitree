@@ -626,7 +626,11 @@ var Go2CpgController = class {
     if (!this.enabled) return;
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
-    const ampScale = Math.abs(this.forwardSpeed);
+    const fwdMag = Math.abs(this.forwardSpeed);
+    const latMag = Math.abs(this.lateralSpeed);
+    const turnMag = Math.abs(this.turnRate);
+    const anyCommand = fwdMag > 0.05 || latMag > 0.05 || turnMag > 0.05;
+    const ampScale = anyCommand ? Math.max(0.3, fwdMag + latMag * 0.5 + turnMag * 0.3) : 0;
     const direction = Math.sign(this.forwardSpeed) || 1;
     const { pitch, roll } = this.getTrunkOrientation();
     const pitchRate = (pitch - this.prevPitch) / this.simDt;
@@ -642,9 +646,11 @@ var Go2CpgController = class {
       const isSwing = swing > 0;
       const isFront = name.startsWith("F");
       const turnSign = isFront ? 1 : -1;
-      const thighTarget = this.homeThigh - direction * this.thighAmp * ampScale * swing + this.turnRate * 0.06 * turnSign * leg.side;
-      const calfTarget = this.homeCalf - this.calfAmp * ampScale * (isSwing ? Math.sin(legPhase) : 0);
-      const hipTarget = this.homeHip + leg.side * this.hipAmp * (isSwing ? 1 : -1) * ampScale + this.lateralSpeed * 0.08 * leg.side;
+      const thighTarget = this.homeThigh - direction * this.thighAmp * ampScale * swing + this.turnRate * 0.15 * turnSign * leg.side;
+      const swingLift = isSwing ? Math.sin(legPhase) : 0;
+      const stancePush = !isSwing ? Math.sin(legPhase + Math.PI) * 0.08 : 0;
+      const calfTarget = this.homeCalf - this.calfAmp * ampScale * swingLift + stancePush * ampScale;
+      const hipTarget = this.homeHip + leg.side * this.hipAmp * (isSwing ? 1 : -1) * ampScale + this.lateralSpeed * 0.25 * leg.side + this.turnRate * 0.04 * turnSign;
       const hipJoint = `${leg.prefix}_hip_joint`;
       const thighJoint = `${leg.prefix}_thigh_joint`;
       const calfJoint = `${leg.prefix}_calf_joint`;
@@ -653,6 +659,7 @@ var Go2CpgController = class {
       ctrl[leg.act[2]] = this.pdTorque(calfJoint, calfTarget, this.calfKp, this.calfKd);
       ctrl[leg.act[1]] += pitchCorr * 0.2;
       ctrl[leg.act[0]] += rollCorr * 0.15 * leg.side;
+      ctrl[leg.act[2]] += pitchCorr * 0.08;
     }
     if (this.model.actuator_ctrlrange) {
       for (let i = 0; i < this.model.nu; i++) {
@@ -1032,10 +1039,6 @@ var H1CpgController = class {
     this.lateralSpeed = Math.max(-0.5, Math.min(0.5, lateral));
     this.turnRate = Math.max(-1, Math.min(1, turn));
   }
-  /**
-   * Extract trunk orientation from qpos quaternion.
-   * Returns { pitch, roll } in radians.
-   */
   getTrunkOrientation() {
     const qw = this.data.qpos[3];
     const qx = this.data.qpos[4];
@@ -1046,10 +1049,6 @@ var H1CpgController = class {
     const roll = Math.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy));
     return { pitch, roll };
   }
-  /**
-   * Compute PD torque for a joint to track a target position.
-   * H1 uses torque actuators, so we compute: tau = kp*(target - q) - kd*qdot
-   */
   pdTorque(jointName, target, kp, kd) {
     const idx = this.jntIdx[jointName];
     if (idx === void 0) return 0;
@@ -1064,17 +1063,17 @@ var H1CpgController = class {
     const qdot = this.data.qvel[dofIdx] || 0;
     return kp * (target - q) - kd * qdot;
   }
-  /**
-   * Step the CPG and compute torques.
-   * Called every physics step.
-   */
   step() {
     if (!this.enabled) return;
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
     const leftPhase = this.phase;
     const rightPhase = this.phase + Math.PI;
-    const ampScale = Math.abs(this.forwardSpeed);
+    const fwdMag = Math.abs(this.forwardSpeed);
+    const latMag = Math.abs(this.lateralSpeed);
+    const turnMag = Math.abs(this.turnRate);
+    const anyCommand = fwdMag > 0.05 || latMag > 0.05 || turnMag > 0.05;
+    const ampScale = anyCommand ? Math.max(0.25, fwdMag + latMag * 0.4 + turnMag * 0.3) : 0;
     const direction = Math.sign(this.forwardSpeed) || 1;
     const { pitch, roll } = this.getTrunkOrientation();
     const pitchRate = (pitch - this.prevPitch) / this.simDt;
@@ -1092,8 +1091,8 @@ var H1CpgController = class {
     const leftHipPitchTarget = this.homeQpos.left_hip_pitch + direction * this.hipPitchAmp * ampScale * leftSwing;
     const leftKneeTarget = this.homeQpos.left_knee + this.kneeAmp * ampScale * Math.max(0, Math.sin(leftPhase));
     const leftAnkleTarget = this.homeQpos.left_ankle - this.ankleAmp * ampScale * leftSwing;
-    const leftHipRollTarget = this.homeQpos.left_hip_roll - this.hipRollAmp * leftStance + this.lateralSpeed * 0.05;
-    const leftHipYawTarget = this.homeQpos.left_hip_yaw + this.turnRate * 0.05 * leftSwing;
+    const leftHipRollTarget = this.homeQpos.left_hip_roll - this.hipRollAmp * leftStance + this.lateralSpeed * 0.12;
+    const leftHipYawTarget = this.homeQpos.left_hip_yaw + this.turnRate * 0.1 * leftSwing;
     ctrl[this.actIdx.left_hip_yaw] = this.pdTorque("left_hip_yaw", leftHipYawTarget, hipKp, hipKd);
     ctrl[this.actIdx.left_hip_roll] = this.pdTorque("left_hip_roll", leftHipRollTarget, hipKp, hipKd);
     ctrl[this.actIdx.left_hip_pitch] = this.pdTorque("left_hip_pitch", leftHipPitchTarget, hipKp, hipKd);
@@ -1104,14 +1103,14 @@ var H1CpgController = class {
     const rightHipPitchTarget = this.homeQpos.right_hip_pitch + direction * this.hipPitchAmp * ampScale * rightSwing;
     const rightKneeTarget = this.homeQpos.right_knee + this.kneeAmp * ampScale * Math.max(0, Math.sin(rightPhase));
     const rightAnkleTarget = this.homeQpos.right_ankle - this.ankleAmp * ampScale * rightSwing;
-    const rightHipRollTarget = this.homeQpos.right_hip_roll + this.hipRollAmp * rightStance + this.lateralSpeed * 0.05;
-    const rightHipYawTarget = this.homeQpos.right_hip_yaw + this.turnRate * 0.05 * rightSwing;
+    const rightHipRollTarget = this.homeQpos.right_hip_roll + this.hipRollAmp * rightStance + this.lateralSpeed * 0.12;
+    const rightHipYawTarget = this.homeQpos.right_hip_yaw + this.turnRate * 0.1 * rightSwing;
     ctrl[this.actIdx.right_hip_yaw] = this.pdTorque("right_hip_yaw", rightHipYawTarget, hipKp, hipKd);
     ctrl[this.actIdx.right_hip_roll] = this.pdTorque("right_hip_roll", rightHipRollTarget, hipKp, hipKd);
     ctrl[this.actIdx.right_hip_pitch] = this.pdTorque("right_hip_pitch", rightHipPitchTarget, hipKp, hipKd);
     ctrl[this.actIdx.right_knee] = this.pdTorque("right_knee", rightKneeTarget, kneeKp, kneeKd);
     ctrl[this.actIdx.right_ankle] = this.pdTorque("right_ankle", rightAnkleTarget, ankleKp, ankleKd);
-    const torsoTarget = this.homeQpos.torso + this.turnRate * 0.1;
+    const torsoTarget = this.homeQpos.torso + this.turnRate * 0.2;
     ctrl[this.actIdx.torso] = this.pdTorque("torso", torsoTarget, torsoKp, torsoKd);
     const pitchCorrection = -this.balanceKp * pitch - this.balanceKd * pitchRate;
     const rollCorrection = -this.balanceKp * roll - this.balanceKd * rollRate;
@@ -1278,7 +1277,11 @@ var B2CpgController = class {
     if (!this.enabled) return;
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
-    const ampScale = Math.abs(this.forwardSpeed);
+    const fwdMag = Math.abs(this.forwardSpeed);
+    const latMag = Math.abs(this.lateralSpeed);
+    const turnMag = Math.abs(this.turnRate);
+    const anyCommand = fwdMag > 0.05 || latMag > 0.05 || turnMag > 0.05;
+    const ampScale = anyCommand ? Math.max(0.3, fwdMag + latMag * 0.5 + turnMag * 0.3) : 0;
     const direction = Math.sign(this.forwardSpeed) || 1;
     const { pitch, roll } = this.getTrunkOrientation();
     const pitchRate = (pitch - this.prevPitch) / this.simDt;
@@ -1294,9 +1297,11 @@ var B2CpgController = class {
       const isSwing = swing > 0;
       const isFront = name.startsWith("F");
       const turnSign = isFront ? 1 : -1;
-      const thighTarget = this.homeThigh - direction * this.thighAmp * ampScale * swing + this.turnRate * 0.06 * turnSign * leg.side;
-      const calfTarget = this.homeCalf - this.calfAmp * ampScale * (isSwing ? Math.sin(legPhase) : 0);
-      const hipTarget = this.homeHip + leg.side * this.hipAmp * (isSwing ? 1 : -1) * ampScale + this.lateralSpeed * 0.08 * leg.side;
+      const thighTarget = this.homeThigh - direction * this.thighAmp * ampScale * swing + this.turnRate * 0.12 * turnSign * leg.side;
+      const swingLift = isSwing ? Math.sin(legPhase) : 0;
+      const stancePush = !isSwing ? Math.sin(legPhase + Math.PI) * 0.06 : 0;
+      const calfTarget = this.homeCalf - this.calfAmp * ampScale * swingLift + stancePush * ampScale;
+      const hipTarget = this.homeHip + leg.side * this.hipAmp * (isSwing ? 1 : -1) * ampScale + this.lateralSpeed * 0.2 * leg.side + this.turnRate * 0.03 * turnSign;
       const hipJoint = `${leg.prefix}_hip_joint`;
       const thighJoint = `${leg.prefix}_thigh_joint`;
       const calfJoint = `${leg.prefix}_calf_joint`;
@@ -1305,6 +1310,7 @@ var B2CpgController = class {
       ctrl[leg.act[2]] = this.pdTorque(calfJoint, calfTarget, this.calfKp, this.calfKd);
       ctrl[leg.act[1]] += pitchCorr * 0.2;
       ctrl[leg.act[0]] += rollCorr * 0.15 * leg.side;
+      ctrl[leg.act[2]] += pitchCorr * 0.08;
     }
     if (this.model.actuator_ctrlrange) {
       for (let i = 0; i < this.model.nu; i++) {
@@ -1415,8 +1421,7 @@ var G1CpgController = class {
     this.prevRoll = 0;
   }
   findJointIndices() {
-    const names = Object.keys(this.actIdx);
-    for (const name of names) {
+    for (const name of Object.keys(this.actIdx)) {
       try {
         const jid = this.mujoco.mj_name2id(this.model, 3, name);
         if (jid >= 0 && this.model.jnt_qposadr) {
@@ -1426,16 +1431,10 @@ var G1CpgController = class {
       }
     }
   }
-  /**
-   * Set the standing pose into qpos.
-   * G1 has no keyframe, so this must be called after loading / resetting.
-   */
   setStandingPose() {
     for (const [name, target] of Object.entries(this.homeQpos)) {
       const idx = this.jntIdx[name];
-      if (idx !== void 0) {
-        this.data.qpos[idx] = target;
-      }
+      if (idx !== void 0) this.data.qpos[idx] = target;
     }
   }
   setCommand(forward, lateral, turn) {
@@ -1443,24 +1442,14 @@ var G1CpgController = class {
     this.lateralSpeed = Math.max(-0.5, Math.min(0.5, lateral));
     this.turnRate = Math.max(-1, Math.min(1, turn));
   }
-  /**
-   * Extract trunk orientation from qpos quaternion.
-   * Returns { pitch, roll } in radians.
-   */
   getTrunkOrientation() {
-    const qw = this.data.qpos[3];
-    const qx = this.data.qpos[4];
-    const qy = this.data.qpos[5];
-    const qz = this.data.qpos[6];
+    const qw = this.data.qpos[3], qx = this.data.qpos[4];
+    const qy = this.data.qpos[5], qz = this.data.qpos[6];
     const sinp = 2 * (qw * qy - qz * qx);
     const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp) * Math.PI / 2 : Math.asin(sinp);
     const roll = Math.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy));
     return { pitch, roll };
   }
-  /**
-   * Compute PD torque for a joint to track a target position.
-   * G1 uses torque actuators, so we compute: tau = kp*(target - q) - kd*qdot
-   */
   pdTorque(jointName, target, kp, kd) {
     const idx = this.jntIdx[jointName];
     if (idx === void 0) return 0;
@@ -1475,17 +1464,17 @@ var G1CpgController = class {
     const qdot = this.data.qvel[dofIdx] || 0;
     return kp * (target - q) - kd * qdot;
   }
-  /**
-   * Step the CPG and compute torques.
-   * Called every physics step.
-   */
   step() {
     if (!this.enabled) return;
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
     const leftPhase = this.phase;
     const rightPhase = this.phase + Math.PI;
-    const ampScale = Math.abs(this.forwardSpeed);
+    const fwdMag = Math.abs(this.forwardSpeed);
+    const latMag = Math.abs(this.lateralSpeed);
+    const turnMag = Math.abs(this.turnRate);
+    const anyCommand = fwdMag > 0.05 || latMag > 0.05 || turnMag > 0.05;
+    const ampScale = anyCommand ? Math.max(0.25, fwdMag + latMag * 0.4 + turnMag * 0.3) : 0;
     const direction = Math.sign(this.forwardSpeed) || 1;
     const { pitch, roll } = this.getTrunkOrientation();
     const pitchRate = (pitch - this.prevPitch) / this.simDt;
@@ -1498,55 +1487,55 @@ var G1CpgController = class {
     const waistKp = 300, waistKd = 12;
     const armKp = 30, armKd = 2;
     const ctrl = this.data.ctrl;
-    const leftSwing = Math.sin(leftPhase);
-    const leftStance = Math.max(0, -Math.sin(leftPhase));
-    const leftHipPitchTarget = this.homeQpos.left_hip_pitch_joint + direction * this.hipPitchAmp * ampScale * leftSwing;
-    const leftKneeTarget = this.homeQpos.left_knee_joint + this.kneeAmp * ampScale * Math.max(0, Math.sin(leftPhase));
-    const leftAnklePitchTarget = this.homeQpos.left_ankle_pitch_joint - this.anklePitchAmp * ampScale * leftSwing;
-    const leftAnkleRollTarget = this.homeQpos.left_ankle_roll_joint - this.ankleRollAmp * leftStance;
-    const leftHipRollTarget = this.homeQpos.left_hip_roll_joint - this.hipRollAmp * leftStance + this.lateralSpeed * 0.05;
-    const leftHipYawTarget = this.homeQpos.left_hip_yaw_joint + this.turnRate * 0.05 * leftSwing;
-    ctrl[this.actIdx.left_hip_pitch_joint] = this.pdTorque("left_hip_pitch_joint", leftHipPitchTarget, hipKp, hipKd);
-    ctrl[this.actIdx.left_hip_roll_joint] = this.pdTorque("left_hip_roll_joint", leftHipRollTarget, hipKp, hipKd);
-    ctrl[this.actIdx.left_hip_yaw_joint] = this.pdTorque("left_hip_yaw_joint", leftHipYawTarget, hipKp, hipKd);
-    ctrl[this.actIdx.left_knee_joint] = this.pdTorque("left_knee_joint", leftKneeTarget, kneeKp, kneeKd);
-    ctrl[this.actIdx.left_ankle_pitch_joint] = this.pdTorque("left_ankle_pitch_joint", leftAnklePitchTarget, ankleKp, ankleKd);
-    ctrl[this.actIdx.left_ankle_roll_joint] = this.pdTorque("left_ankle_roll_joint", leftAnkleRollTarget, ankleKp, ankleKd);
-    const rightSwing = Math.sin(rightPhase);
-    const rightStance = Math.max(0, -Math.sin(rightPhase));
-    const rightHipPitchTarget = this.homeQpos.right_hip_pitch_joint + direction * this.hipPitchAmp * ampScale * rightSwing;
-    const rightKneeTarget = this.homeQpos.right_knee_joint + this.kneeAmp * ampScale * Math.max(0, Math.sin(rightPhase));
-    const rightAnklePitchTarget = this.homeQpos.right_ankle_pitch_joint - this.anklePitchAmp * ampScale * rightSwing;
-    const rightAnkleRollTarget = this.homeQpos.right_ankle_roll_joint + this.ankleRollAmp * rightStance;
-    const rightHipRollTarget = this.homeQpos.right_hip_roll_joint + this.hipRollAmp * rightStance + this.lateralSpeed * 0.05;
-    const rightHipYawTarget = this.homeQpos.right_hip_yaw_joint + this.turnRate * 0.05 * rightSwing;
-    ctrl[this.actIdx.right_hip_pitch_joint] = this.pdTorque("right_hip_pitch_joint", rightHipPitchTarget, hipKp, hipKd);
-    ctrl[this.actIdx.right_hip_roll_joint] = this.pdTorque("right_hip_roll_joint", rightHipRollTarget, hipKp, hipKd);
-    ctrl[this.actIdx.right_hip_yaw_joint] = this.pdTorque("right_hip_yaw_joint", rightHipYawTarget, hipKp, hipKd);
-    ctrl[this.actIdx.right_knee_joint] = this.pdTorque("right_knee_joint", rightKneeTarget, kneeKp, kneeKd);
-    ctrl[this.actIdx.right_ankle_pitch_joint] = this.pdTorque("right_ankle_pitch_joint", rightAnklePitchTarget, ankleKp, ankleKd);
-    ctrl[this.actIdx.right_ankle_roll_joint] = this.pdTorque("right_ankle_roll_joint", rightAnkleRollTarget, ankleKp, ankleKd);
-    const waistYawTarget = this.homeQpos.waist_yaw_joint + this.turnRate * 0.1;
-    const waistPitchTarget = this.homeQpos.waist_pitch_joint - this.waistPitchGain * pitch;
-    const waistRollTarget = this.homeQpos.waist_roll_joint - this.waistRollGain * roll;
-    ctrl[this.actIdx.waist_yaw_joint] = this.pdTorque("waist_yaw_joint", waistYawTarget, waistKp, waistKd);
-    ctrl[this.actIdx.waist_roll_joint] = this.pdTorque("waist_roll_joint", waistRollTarget, waistKp, waistKd);
-    ctrl[this.actIdx.waist_pitch_joint] = this.pdTorque("waist_pitch_joint", waistPitchTarget, waistKp, waistKd);
-    const pitchCorrection = -this.balanceKp * pitch - this.balanceKd * pitchRate;
-    const rollCorrection = -this.balanceKp * roll - this.balanceKd * rollRate;
-    ctrl[this.actIdx.left_ankle_pitch_joint] += pitchCorrection * 0.4;
-    ctrl[this.actIdx.right_ankle_pitch_joint] += pitchCorrection * 0.4;
-    ctrl[this.actIdx.left_ankle_roll_joint] += rollCorrection * 0.3;
-    ctrl[this.actIdx.right_ankle_roll_joint] -= rollCorrection * 0.3;
-    ctrl[this.actIdx.left_hip_pitch_joint] += pitchCorrection * 0.4;
-    ctrl[this.actIdx.right_hip_pitch_joint] += pitchCorrection * 0.4;
-    ctrl[this.actIdx.left_hip_roll_joint] += rollCorrection * 0.3;
-    ctrl[this.actIdx.right_hip_roll_joint] -= rollCorrection * 0.3;
-    const leftArmSwing = -this.armSwingGain * direction * ampScale * leftSwing;
-    const rightArmSwing = -this.armSwingGain * direction * ampScale * rightSwing;
+    const lS = Math.sin(leftPhase);
+    const lSt = Math.max(0, -Math.sin(leftPhase));
+    const lHipPitch = this.homeQpos.left_hip_pitch_joint + direction * this.hipPitchAmp * ampScale * lS;
+    const lKnee = this.homeQpos.left_knee_joint + this.kneeAmp * ampScale * Math.max(0, Math.sin(leftPhase));
+    const lAnkleP = this.homeQpos.left_ankle_pitch_joint - this.anklePitchAmp * ampScale * lS;
+    const lAnkleR = this.homeQpos.left_ankle_roll_joint - this.ankleRollAmp * lSt;
+    const lHipRoll = this.homeQpos.left_hip_roll_joint - this.hipRollAmp * lSt + this.lateralSpeed * 0.12;
+    const lHipYaw = this.homeQpos.left_hip_yaw_joint + this.turnRate * 0.1 * lS;
+    ctrl[this.actIdx.left_hip_pitch_joint] = this.pdTorque("left_hip_pitch_joint", lHipPitch, hipKp, hipKd);
+    ctrl[this.actIdx.left_hip_roll_joint] = this.pdTorque("left_hip_roll_joint", lHipRoll, hipKp, hipKd);
+    ctrl[this.actIdx.left_hip_yaw_joint] = this.pdTorque("left_hip_yaw_joint", lHipYaw, hipKp, hipKd);
+    ctrl[this.actIdx.left_knee_joint] = this.pdTorque("left_knee_joint", lKnee, kneeKp, kneeKd);
+    ctrl[this.actIdx.left_ankle_pitch_joint] = this.pdTorque("left_ankle_pitch_joint", lAnkleP, ankleKp, ankleKd);
+    ctrl[this.actIdx.left_ankle_roll_joint] = this.pdTorque("left_ankle_roll_joint", lAnkleR, ankleKp, ankleKd);
+    const rS = Math.sin(rightPhase);
+    const rSt = Math.max(0, -Math.sin(rightPhase));
+    const rHipPitch = this.homeQpos.right_hip_pitch_joint + direction * this.hipPitchAmp * ampScale * rS;
+    const rKnee = this.homeQpos.right_knee_joint + this.kneeAmp * ampScale * Math.max(0, Math.sin(rightPhase));
+    const rAnkleP = this.homeQpos.right_ankle_pitch_joint - this.anklePitchAmp * ampScale * rS;
+    const rAnkleR = this.homeQpos.right_ankle_roll_joint + this.ankleRollAmp * rSt;
+    const rHipRoll = this.homeQpos.right_hip_roll_joint + this.hipRollAmp * rSt + this.lateralSpeed * 0.12;
+    const rHipYaw = this.homeQpos.right_hip_yaw_joint + this.turnRate * 0.1 * rS;
+    ctrl[this.actIdx.right_hip_pitch_joint] = this.pdTorque("right_hip_pitch_joint", rHipPitch, hipKp, hipKd);
+    ctrl[this.actIdx.right_hip_roll_joint] = this.pdTorque("right_hip_roll_joint", rHipRoll, hipKp, hipKd);
+    ctrl[this.actIdx.right_hip_yaw_joint] = this.pdTorque("right_hip_yaw_joint", rHipYaw, hipKp, hipKd);
+    ctrl[this.actIdx.right_knee_joint] = this.pdTorque("right_knee_joint", rKnee, kneeKp, kneeKd);
+    ctrl[this.actIdx.right_ankle_pitch_joint] = this.pdTorque("right_ankle_pitch_joint", rAnkleP, ankleKp, ankleKd);
+    ctrl[this.actIdx.right_ankle_roll_joint] = this.pdTorque("right_ankle_roll_joint", rAnkleR, ankleKp, ankleKd);
+    const waistYaw = this.homeQpos.waist_yaw_joint + this.turnRate * 0.15;
+    const waistPitch = this.homeQpos.waist_pitch_joint - this.waistPitchGain * pitch;
+    const waistRoll = this.homeQpos.waist_roll_joint - this.waistRollGain * roll;
+    ctrl[this.actIdx.waist_yaw_joint] = this.pdTorque("waist_yaw_joint", waistYaw, waistKp, waistKd);
+    ctrl[this.actIdx.waist_roll_joint] = this.pdTorque("waist_roll_joint", waistRoll, waistKp, waistKd);
+    ctrl[this.actIdx.waist_pitch_joint] = this.pdTorque("waist_pitch_joint", waistPitch, waistKp, waistKd);
+    const pCorr = -this.balanceKp * pitch - this.balanceKd * pitchRate;
+    const rCorr = -this.balanceKp * roll - this.balanceKd * rollRate;
+    ctrl[this.actIdx.left_ankle_pitch_joint] += pCorr * 0.4;
+    ctrl[this.actIdx.right_ankle_pitch_joint] += pCorr * 0.4;
+    ctrl[this.actIdx.left_ankle_roll_joint] += rCorr * 0.3;
+    ctrl[this.actIdx.right_ankle_roll_joint] -= rCorr * 0.3;
+    ctrl[this.actIdx.left_hip_pitch_joint] += pCorr * 0.4;
+    ctrl[this.actIdx.right_hip_pitch_joint] += pCorr * 0.4;
+    ctrl[this.actIdx.left_hip_roll_joint] += rCorr * 0.3;
+    ctrl[this.actIdx.right_hip_roll_joint] -= rCorr * 0.3;
+    const lArm = -this.armSwingGain * direction * ampScale * lS;
+    const rArm = -this.armSwingGain * direction * ampScale * rS;
     ctrl[this.actIdx.left_shoulder_pitch_joint] = this.pdTorque(
       "left_shoulder_pitch_joint",
-      this.homeQpos.left_shoulder_pitch_joint + leftArmSwing,
+      this.homeQpos.left_shoulder_pitch_joint + lArm,
       armKp,
       armKd
     );
@@ -1570,7 +1559,7 @@ var G1CpgController = class {
     );
     ctrl[this.actIdx.right_shoulder_pitch_joint] = this.pdTorque(
       "right_shoulder_pitch_joint",
-      this.homeQpos.right_shoulder_pitch_joint + rightArmSwing,
+      this.homeQpos.right_shoulder_pitch_joint + rArm,
       armKp,
       armKd
     );
@@ -1592,42 +1581,12 @@ var G1CpgController = class {
       armKp,
       armKd
     );
-    ctrl[this.actIdx.left_wrist_roll_joint] = this.pdTorque(
-      "left_wrist_roll_joint",
-      this.homeQpos.left_wrist_roll_joint,
-      armKp * 0.3,
-      armKd * 0.5
-    );
-    ctrl[this.actIdx.left_wrist_pitch_joint] = this.pdTorque(
-      "left_wrist_pitch_joint",
-      this.homeQpos.left_wrist_pitch_joint,
-      armKp * 0.3,
-      armKd * 0.5
-    );
-    ctrl[this.actIdx.left_wrist_yaw_joint] = this.pdTorque(
-      "left_wrist_yaw_joint",
-      this.homeQpos.left_wrist_yaw_joint,
-      armKp * 0.3,
-      armKd * 0.5
-    );
-    ctrl[this.actIdx.right_wrist_roll_joint] = this.pdTorque(
-      "right_wrist_roll_joint",
-      this.homeQpos.right_wrist_roll_joint,
-      armKp * 0.3,
-      armKd * 0.5
-    );
-    ctrl[this.actIdx.right_wrist_pitch_joint] = this.pdTorque(
-      "right_wrist_pitch_joint",
-      this.homeQpos.right_wrist_pitch_joint,
-      armKp * 0.3,
-      armKd * 0.5
-    );
-    ctrl[this.actIdx.right_wrist_yaw_joint] = this.pdTorque(
-      "right_wrist_yaw_joint",
-      this.homeQpos.right_wrist_yaw_joint,
-      armKp * 0.3,
-      armKd * 0.5
-    );
+    for (const side of ["left", "right"]) {
+      for (const axis of ["roll", "pitch", "yaw"]) {
+        const j = `${side}_wrist_${axis}_joint`;
+        ctrl[this.actIdx[j]] = this.pdTorque(j, this.homeQpos[j], armKp * 0.3, armKd * 0.5);
+      }
+    }
     if (this.model.actuator_ctrlrange) {
       for (let i = 0; i < this.model.nu; i++) {
         const lo = this.model.actuator_ctrlrange[i * 2];
@@ -1728,8 +1687,7 @@ var H1_2CpgController = class {
     this.prevRoll = 0;
   }
   findJointIndices() {
-    const names = Object.keys(this.actIdx);
-    for (const name of names) {
+    for (const name of Object.keys(this.actIdx)) {
       try {
         const jid = this.mujoco.mj_name2id(this.model, 3, name);
         if (jid >= 0 && this.model.jnt_qposadr) {
@@ -1744,24 +1702,14 @@ var H1_2CpgController = class {
     this.lateralSpeed = Math.max(-0.5, Math.min(0.5, lateral));
     this.turnRate = Math.max(-1, Math.min(1, turn));
   }
-  /**
-   * Extract trunk orientation from qpos quaternion.
-   * Returns { pitch, roll } in radians.
-   */
   getTrunkOrientation() {
-    const qw = this.data.qpos[3];
-    const qx = this.data.qpos[4];
-    const qy = this.data.qpos[5];
-    const qz = this.data.qpos[6];
+    const qw = this.data.qpos[3], qx = this.data.qpos[4];
+    const qy = this.data.qpos[5], qz = this.data.qpos[6];
     const sinp = 2 * (qw * qy - qz * qx);
     const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp) * Math.PI / 2 : Math.asin(sinp);
     const roll = Math.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy));
     return { pitch, roll };
   }
-  /**
-   * Compute PD torque for a joint to track a target position.
-   * H1-2 uses torque actuators, so we compute: tau = kp*(target - q) - kd*qdot
-   */
   pdTorque(jointName, target, kp, kd) {
     const idx = this.jntIdx[jointName];
     if (idx === void 0) return 0;
@@ -1776,17 +1724,17 @@ var H1_2CpgController = class {
     const qdot = this.data.qvel[dofIdx] || 0;
     return kp * (target - q) - kd * qdot;
   }
-  /**
-   * Step the CPG and compute torques.
-   * Called every physics step.
-   */
   step() {
     if (!this.enabled) return;
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
     const leftPhase = this.phase;
     const rightPhase = this.phase + Math.PI;
-    const ampScale = Math.abs(this.forwardSpeed);
+    const fwdMag = Math.abs(this.forwardSpeed);
+    const latMag = Math.abs(this.lateralSpeed);
+    const turnMag = Math.abs(this.turnRate);
+    const anyCommand = fwdMag > 0.05 || latMag > 0.05 || turnMag > 0.05;
+    const ampScale = anyCommand ? Math.max(0.25, fwdMag + latMag * 0.4 + turnMag * 0.3) : 0;
     const direction = Math.sign(this.forwardSpeed) || 1;
     const { pitch, roll } = this.getTrunkOrientation();
     const pitchRate = (pitch - this.prevPitch) / this.simDt;
@@ -1795,56 +1743,60 @@ var H1_2CpgController = class {
     this.prevRoll = roll;
     const hipKp = 800, hipKd = 30;
     const kneeKp = 1200, kneeKd = 40;
-    const anklePitchKp = 200, anklePitchKd = 10;
-    const ankleRollKp = 100, ankleRollKd = 5;
+    const apKp = 200, apKd = 10;
+    const arKp = 100, arKd = 5;
     const torsoKp = 600, torsoKd = 25;
     const armKp = 50, armKd = 3;
     const ctrl = this.data.ctrl;
-    const leftSwing = Math.sin(leftPhase);
-    const leftStance = Math.max(0, -Math.sin(leftPhase));
-    const leftHipPitchTarget = this.homeQpos.left_hip_pitch_joint + direction * this.hipPitchAmp * ampScale * leftSwing;
-    const leftKneeTarget = this.homeQpos.left_knee_joint + this.kneeAmp * ampScale * Math.max(0, Math.sin(leftPhase));
-    const leftAnklePitchTarget = this.homeQpos.left_ankle_pitch_joint - this.anklePitchAmp * ampScale * leftSwing;
-    const leftAnkleRollTarget = this.homeQpos.left_ankle_roll_joint - this.ankleRollAmp * leftStance;
-    const leftHipRollTarget = this.homeQpos.left_hip_roll_joint - this.hipRollAmp * leftStance + this.lateralSpeed * 0.05;
-    const leftHipYawTarget = this.homeQpos.left_hip_yaw_joint + this.turnRate * 0.05 * leftSwing;
-    ctrl[this.actIdx.left_hip_yaw_joint] = this.pdTorque("left_hip_yaw_joint", leftHipYawTarget, hipKp, hipKd);
-    ctrl[this.actIdx.left_hip_pitch_joint] = this.pdTorque("left_hip_pitch_joint", leftHipPitchTarget, hipKp, hipKd);
-    ctrl[this.actIdx.left_hip_roll_joint] = this.pdTorque("left_hip_roll_joint", leftHipRollTarget, hipKp, hipKd);
-    ctrl[this.actIdx.left_knee_joint] = this.pdTorque("left_knee_joint", leftKneeTarget, kneeKp, kneeKd);
-    ctrl[this.actIdx.left_ankle_pitch_joint] = this.pdTorque("left_ankle_pitch_joint", leftAnklePitchTarget, anklePitchKp, anklePitchKd);
-    ctrl[this.actIdx.left_ankle_roll_joint] = this.pdTorque("left_ankle_roll_joint", leftAnkleRollTarget, ankleRollKp, ankleRollKd);
-    const rightSwing = Math.sin(rightPhase);
-    const rightStance = Math.max(0, -Math.sin(rightPhase));
-    const rightHipPitchTarget = this.homeQpos.right_hip_pitch_joint + direction * this.hipPitchAmp * ampScale * rightSwing;
-    const rightKneeTarget = this.homeQpos.right_knee_joint + this.kneeAmp * ampScale * Math.max(0, Math.sin(rightPhase));
-    const rightAnklePitchTarget = this.homeQpos.right_ankle_pitch_joint - this.anklePitchAmp * ampScale * rightSwing;
-    const rightAnkleRollTarget = this.homeQpos.right_ankle_roll_joint + this.ankleRollAmp * rightStance;
-    const rightHipRollTarget = this.homeQpos.right_hip_roll_joint + this.hipRollAmp * rightStance + this.lateralSpeed * 0.05;
-    const rightHipYawTarget = this.homeQpos.right_hip_yaw_joint + this.turnRate * 0.05 * rightSwing;
-    ctrl[this.actIdx.right_hip_yaw_joint] = this.pdTorque("right_hip_yaw_joint", rightHipYawTarget, hipKp, hipKd);
-    ctrl[this.actIdx.right_hip_pitch_joint] = this.pdTorque("right_hip_pitch_joint", rightHipPitchTarget, hipKp, hipKd);
-    ctrl[this.actIdx.right_hip_roll_joint] = this.pdTorque("right_hip_roll_joint", rightHipRollTarget, hipKp, hipKd);
-    ctrl[this.actIdx.right_knee_joint] = this.pdTorque("right_knee_joint", rightKneeTarget, kneeKp, kneeKd);
-    ctrl[this.actIdx.right_ankle_pitch_joint] = this.pdTorque("right_ankle_pitch_joint", rightAnklePitchTarget, anklePitchKp, anklePitchKd);
-    ctrl[this.actIdx.right_ankle_roll_joint] = this.pdTorque("right_ankle_roll_joint", rightAnkleRollTarget, ankleRollKp, ankleRollKd);
-    const torsoTarget = this.homeQpos.torso_joint + this.turnRate * 0.1;
-    ctrl[this.actIdx.torso_joint] = this.pdTorque("torso_joint", torsoTarget, torsoKp, torsoKd);
-    const pitchCorrection = -this.balanceKp * pitch - this.balanceKd * pitchRate;
-    const rollCorrection = -this.balanceKp * roll - this.balanceKd * rollRate;
-    ctrl[this.actIdx.left_ankle_pitch_joint] += pitchCorrection * 0.4;
-    ctrl[this.actIdx.right_ankle_pitch_joint] += pitchCorrection * 0.4;
-    ctrl[this.actIdx.left_ankle_roll_joint] += rollCorrection * 0.25;
-    ctrl[this.actIdx.right_ankle_roll_joint] -= rollCorrection * 0.25;
-    ctrl[this.actIdx.left_hip_pitch_joint] += pitchCorrection * 0.5;
-    ctrl[this.actIdx.right_hip_pitch_joint] += pitchCorrection * 0.5;
-    ctrl[this.actIdx.left_hip_roll_joint] += rollCorrection * 0.3;
-    ctrl[this.actIdx.right_hip_roll_joint] -= rollCorrection * 0.3;
-    const leftArmSwing = -this.armSwingGain * direction * ampScale * leftSwing;
-    const rightArmSwing = -this.armSwingGain * direction * ampScale * rightSwing;
+    const lS = Math.sin(leftPhase);
+    const lSt = Math.max(0, -Math.sin(leftPhase));
+    const lHipPitch = this.homeQpos.left_hip_pitch_joint + direction * this.hipPitchAmp * ampScale * lS;
+    const lKnee = this.homeQpos.left_knee_joint + this.kneeAmp * ampScale * Math.max(0, Math.sin(leftPhase));
+    const lAnkleP = this.homeQpos.left_ankle_pitch_joint - this.anklePitchAmp * ampScale * lS;
+    const lAnkleR = this.homeQpos.left_ankle_roll_joint - this.ankleRollAmp * lSt;
+    const lHipRoll = this.homeQpos.left_hip_roll_joint - this.hipRollAmp * lSt + this.lateralSpeed * 0.12;
+    const lHipYaw = this.homeQpos.left_hip_yaw_joint + this.turnRate * 0.1 * lS;
+    ctrl[this.actIdx.left_hip_yaw_joint] = this.pdTorque("left_hip_yaw_joint", lHipYaw, hipKp, hipKd);
+    ctrl[this.actIdx.left_hip_pitch_joint] = this.pdTorque("left_hip_pitch_joint", lHipPitch, hipKp, hipKd);
+    ctrl[this.actIdx.left_hip_roll_joint] = this.pdTorque("left_hip_roll_joint", lHipRoll, hipKp, hipKd);
+    ctrl[this.actIdx.left_knee_joint] = this.pdTorque("left_knee_joint", lKnee, kneeKp, kneeKd);
+    ctrl[this.actIdx.left_ankle_pitch_joint] = this.pdTorque("left_ankle_pitch_joint", lAnkleP, apKp, apKd);
+    ctrl[this.actIdx.left_ankle_roll_joint] = this.pdTorque("left_ankle_roll_joint", lAnkleR, arKp, arKd);
+    const rS = Math.sin(rightPhase);
+    const rSt = Math.max(0, -Math.sin(rightPhase));
+    const rHipPitch = this.homeQpos.right_hip_pitch_joint + direction * this.hipPitchAmp * ampScale * rS;
+    const rKnee = this.homeQpos.right_knee_joint + this.kneeAmp * ampScale * Math.max(0, Math.sin(rightPhase));
+    const rAnkleP = this.homeQpos.right_ankle_pitch_joint - this.anklePitchAmp * ampScale * rS;
+    const rAnkleR = this.homeQpos.right_ankle_roll_joint + this.ankleRollAmp * rSt;
+    const rHipRoll = this.homeQpos.right_hip_roll_joint + this.hipRollAmp * rSt + this.lateralSpeed * 0.12;
+    const rHipYaw = this.homeQpos.right_hip_yaw_joint + this.turnRate * 0.1 * rS;
+    ctrl[this.actIdx.right_hip_yaw_joint] = this.pdTorque("right_hip_yaw_joint", rHipYaw, hipKp, hipKd);
+    ctrl[this.actIdx.right_hip_pitch_joint] = this.pdTorque("right_hip_pitch_joint", rHipPitch, hipKp, hipKd);
+    ctrl[this.actIdx.right_hip_roll_joint] = this.pdTorque("right_hip_roll_joint", rHipRoll, hipKp, hipKd);
+    ctrl[this.actIdx.right_knee_joint] = this.pdTorque("right_knee_joint", rKnee, kneeKp, kneeKd);
+    ctrl[this.actIdx.right_ankle_pitch_joint] = this.pdTorque("right_ankle_pitch_joint", rAnkleP, apKp, apKd);
+    ctrl[this.actIdx.right_ankle_roll_joint] = this.pdTorque("right_ankle_roll_joint", rAnkleR, arKp, arKd);
+    ctrl[this.actIdx.torso_joint] = this.pdTorque(
+      "torso_joint",
+      this.homeQpos.torso_joint + this.turnRate * 0.2,
+      torsoKp,
+      torsoKd
+    );
+    const pCorr = -this.balanceKp * pitch - this.balanceKd * pitchRate;
+    const rCorr = -this.balanceKp * roll - this.balanceKd * rollRate;
+    ctrl[this.actIdx.left_ankle_pitch_joint] += pCorr * 0.4;
+    ctrl[this.actIdx.right_ankle_pitch_joint] += pCorr * 0.4;
+    ctrl[this.actIdx.left_ankle_roll_joint] += rCorr * 0.25;
+    ctrl[this.actIdx.right_ankle_roll_joint] -= rCorr * 0.25;
+    ctrl[this.actIdx.left_hip_pitch_joint] += pCorr * 0.5;
+    ctrl[this.actIdx.right_hip_pitch_joint] += pCorr * 0.5;
+    ctrl[this.actIdx.left_hip_roll_joint] += rCorr * 0.3;
+    ctrl[this.actIdx.right_hip_roll_joint] -= rCorr * 0.3;
+    const lArm = -this.armSwingGain * direction * ampScale * lS;
+    const rArm = -this.armSwingGain * direction * ampScale * rS;
     ctrl[this.actIdx.left_shoulder_pitch_joint] = this.pdTorque(
       "left_shoulder_pitch_joint",
-      this.homeQpos.left_shoulder_pitch_joint + leftArmSwing,
+      this.homeQpos.left_shoulder_pitch_joint + lArm,
       armKp,
       armKd
     );
@@ -1868,7 +1820,7 @@ var H1_2CpgController = class {
     );
     ctrl[this.actIdx.right_shoulder_pitch_joint] = this.pdTorque(
       "right_shoulder_pitch_joint",
-      this.homeQpos.right_shoulder_pitch_joint + rightArmSwing,
+      this.homeQpos.right_shoulder_pitch_joint + rArm,
       armKp,
       armKd
     );
@@ -1890,44 +1842,13 @@ var H1_2CpgController = class {
       armKp,
       armKd
     );
-    const wristKp = armKp * 0.3;
-    const wristKd = armKd * 0.5;
-    ctrl[this.actIdx.left_wrist_roll_joint] = this.pdTorque(
-      "left_wrist_roll_joint",
-      this.homeQpos.left_wrist_roll_joint,
-      wristKp,
-      wristKd
-    );
-    ctrl[this.actIdx.left_wrist_pitch_joint] = this.pdTorque(
-      "left_wrist_pitch_joint",
-      this.homeQpos.left_wrist_pitch_joint,
-      wristKp,
-      wristKd
-    );
-    ctrl[this.actIdx.left_wrist_yaw_joint] = this.pdTorque(
-      "left_wrist_yaw_joint",
-      this.homeQpos.left_wrist_yaw_joint,
-      wristKp,
-      wristKd
-    );
-    ctrl[this.actIdx.right_wrist_roll_joint] = this.pdTorque(
-      "right_wrist_roll_joint",
-      this.homeQpos.right_wrist_roll_joint,
-      wristKp,
-      wristKd
-    );
-    ctrl[this.actIdx.right_wrist_pitch_joint] = this.pdTorque(
-      "right_wrist_pitch_joint",
-      this.homeQpos.right_wrist_pitch_joint,
-      wristKp,
-      wristKd
-    );
-    ctrl[this.actIdx.right_wrist_yaw_joint] = this.pdTorque(
-      "right_wrist_yaw_joint",
-      this.homeQpos.right_wrist_yaw_joint,
-      wristKp,
-      wristKd
-    );
+    const wKp = armKp * 0.3, wKd = armKd * 0.5;
+    for (const side of ["left", "right"]) {
+      for (const axis of ["roll", "pitch", "yaw"]) {
+        const j = `${side}_wrist_${axis}_joint`;
+        ctrl[this.actIdx[j]] = this.pdTorque(j, this.homeQpos[j], wKp, wKd);
+      }
+    }
     if (this.model.actuator_ctrlrange) {
       for (let i = 0; i < this.model.nu; i++) {
         const lo = this.model.actuator_ctrlrange[i * 2];
@@ -2043,7 +1964,11 @@ var SingleRobotCPG = class {
     if (!this.enabled) return;
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
-    const ampScale = Math.abs(this.forwardSpeed);
+    const fwdMag = Math.abs(this.forwardSpeed);
+    const latMag = Math.abs(this.lateralSpeed);
+    const turnMag = Math.abs(this.turnRate);
+    const anyCommand = fwdMag > 0.05 || latMag > 0.05 || turnMag > 0.05;
+    const ampScale = anyCommand ? Math.max(0.3, fwdMag + latMag * 0.5 + turnMag * 0.3) : 0;
     const direction = Math.sign(this.forwardSpeed) || 1;
     const { pitch, roll } = this.getTrunkOrientation();
     const pitchRate = (pitch - this.prevPitch) / this.simDt;
@@ -2066,9 +1991,9 @@ var SingleRobotCPG = class {
       const swing = Math.sin(legPhase);
       const isSwing = swing > 0;
       const turnSign = isFront ? 1 : -1;
-      const thighTarget = this.homeThigh - direction * this.thighAmp * ampScale * swing + this.turnRate * 0.06 * turnSign * side;
+      const thighTarget = this.homeThigh - direction * this.thighAmp * ampScale * swing + this.turnRate * 0.15 * turnSign * side;
       const calfTarget = this.homeCalf - this.calfAmp * ampScale * (isSwing ? Math.sin(legPhase) : 0);
-      const hipTarget = this.homeHip + side * this.hipAmp * (isSwing ? 1 : -1) * ampScale + this.lateralSpeed * 0.08 * side;
+      const hipTarget = this.homeHip + side * this.hipAmp * (isSwing ? 1 : -1) * ampScale + this.lateralSpeed * 0.25 * side;
       const hipJoint = `${p}${legName}_hip_joint`;
       const thighJoint = `${p}${legName}_thigh_joint`;
       const calfJoint = `${p}${legName}_calf_joint`;
@@ -3528,16 +3453,16 @@ function handleInput() {
   let fwd = 0, lat = 0, turn = 0;
   if (kbFwd) fwd = 0.8;
   if (kbBack) fwd = -0.4;
-  if (kbLeft) lat = 0.3;
-  if (kbRight) lat = -0.3;
-  if (kbRotL) turn = 0.5;
-  if (kbRotR) turn = -0.5;
+  if (kbLeft) lat = 0.4;
+  if (kbRight) lat = -0.4;
+  if (kbRotL) turn = 0.7;
+  if (kbRotR) turn = -0.7;
   if (Math.abs(touchY) > 0.15 || Math.abs(touchX) > 0.15) {
     fwd = touchY * 0.8;
-    lat = -touchX * 0.3;
+    lat = -touchX * 0.4;
   }
-  if (touchRotL) turn = 0.5;
-  if (touchRotR) turn = -0.5;
+  if (touchRotL) turn = 0.7;
+  if (touchRotR) turn = -0.7;
   const ctrl = getActiveCtrl();
   if (ctrl && ctrl.enabled && ctrl.setCommand) {
     ctrl.setCommand(fwd, lat, turn);

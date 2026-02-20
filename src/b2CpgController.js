@@ -124,7 +124,13 @@ export class B2CpgController {
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
 
-    const ampScale = Math.abs(this.forwardSpeed);
+    // Compute effective amplitude — activate gait for ANY command
+    const fwdMag = Math.abs(this.forwardSpeed);
+    const latMag = Math.abs(this.lateralSpeed);
+    const turnMag = Math.abs(this.turnRate);
+    const anyCommand = fwdMag > 0.05 || latMag > 0.05 || turnMag > 0.05;
+    const ampScale = anyCommand
+      ? Math.max(0.3, fwdMag + latMag * 0.5 + turnMag * 0.3) : 0;
     const direction = Math.sign(this.forwardSpeed) || 1;
 
     // Trunk orientation for balance
@@ -149,19 +155,22 @@ export class B2CpgController {
       const turnSign = isFront ? 1 : -1;
 
       // Thigh (hip flexion): swing forward/back
-      // Negative = leg forward, positive = leg backward (for B2 Y-axis joints)
       const thighTarget = this.homeThigh
         - direction * this.thighAmp * ampScale * swing
-        + this.turnRate * 0.06 * turnSign * leg.side;
+        + this.turnRate * 0.12 * turnSign * leg.side;
 
-      // Calf (knee): bend more during swing, extend during stance
+      // Calf (knee): bend during swing + stance push-off
+      const swingLift = isSwing ? Math.sin(legPhase) : 0;
+      const stancePush = !isSwing ? Math.sin(legPhase + Math.PI) * 0.06 : 0;
       const calfTarget = this.homeCalf
-        - this.calfAmp * ampScale * (isSwing ? Math.sin(legPhase) : 0);
+        - this.calfAmp * ampScale * swingLift
+        + stancePush * ampScale;
 
-      // Hip (abduction): lateral balance + lateral movement
+      // Hip (abduction): lateral movement + balance
       const hipTarget = this.homeHip
         + leg.side * this.hipAmp * (isSwing ? 1 : -1) * ampScale
-        + this.lateralSpeed * 0.08 * leg.side;
+        + this.lateralSpeed * 0.2 * leg.side
+        + this.turnRate * 0.03 * turnSign;
 
       // PD torques
       const hipJoint = `${leg.prefix}_hip_joint`;
@@ -172,9 +181,10 @@ export class B2CpgController {
       ctrl[leg.act[1]] = this.pdTorque(thighJoint, thighTarget, this.thighKp, this.thighKd);
       ctrl[leg.act[2]] = this.pdTorque(calfJoint, calfTarget, this.calfKp, this.calfKd);
 
-      // Balance corrections on thigh and hip
+      // Balance corrections
       ctrl[leg.act[1]] += pitchCorr * 0.2;
       ctrl[leg.act[0]] += rollCorr * 0.15 * leg.side;
+      ctrl[leg.act[2]] += pitchCorr * 0.08;
     }
 
     // Clamp to actuator ranges

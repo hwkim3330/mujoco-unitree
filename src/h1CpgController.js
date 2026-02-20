@@ -17,8 +17,8 @@
  *  left_leg:  [0, 0, -0.4, 0.8, -0.4]
  *  right_leg: [0, 0, -0.4, 0.8, -0.4]
  *  torso: 0
- *  left_arm:  [0, 0, 0, 0]
- *  right_arm: [0, 0, 0, 0]
+ *  left_arm:  [0, 0.2, 0, -0.3]
+ *  right_arm: [0, -0.2, 0, -0.3]
  */
 
 export class H1CpgController {
@@ -99,17 +99,12 @@ export class H1CpgController {
     this.turnRate = Math.max(-1, Math.min(1, turn));
   }
 
-  /**
-   * Extract trunk orientation from qpos quaternion.
-   * Returns { pitch, roll } in radians.
-   */
   getTrunkOrientation() {
     const qw = this.data.qpos[3];
     const qx = this.data.qpos[4];
     const qy = this.data.qpos[5];
     const qz = this.data.qpos[6];
 
-    // Euler angles from quaternion (ZYX convention)
     const sinp = 2 * (qw * qy - qz * qx);
     const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp) * Math.PI / 2 : Math.asin(sinp);
     const roll = Math.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy));
@@ -117,21 +112,16 @@ export class H1CpgController {
     return { pitch, roll };
   }
 
-  /**
-   * Compute PD torque for a joint to track a target position.
-   * H1 uses torque actuators, so we compute: tau = kp*(target - q) - kd*qdot
-   */
   pdTorque(jointName, target, kp, kd) {
     const idx = this.jntIdx[jointName];
     if (idx === undefined) return 0;
 
-    // Find qvel index via jnt_dofadr
     let dofIdx;
     try {
       const jid = this.mujoco.mj_name2id(this.model, 3, jointName);
       dofIdx = this.model.jnt_dofadr[jid];
     } catch (e) {
-      dofIdx = idx - 7 + 6; // fallback
+      dofIdx = idx - 7 + 6;
     }
 
     const q = this.data.qpos[idx];
@@ -140,10 +130,6 @@ export class H1CpgController {
     return kp * (target - q) - kd * qdot;
   }
 
-  /**
-   * Step the CPG and compute torques.
-   * Called every physics step.
-   */
   step() {
     if (!this.enabled) return;
 
@@ -152,10 +138,15 @@ export class H1CpgController {
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
 
     const leftPhase = this.phase;
-    const rightPhase = this.phase + Math.PI; // Opposite leg
+    const rightPhase = this.phase + Math.PI;
 
-    // Scale amplitudes by forward command
-    const ampScale = Math.abs(this.forwardSpeed);
+    // Activate gait for ANY command (lateral/turn included)
+    const fwdMag = Math.abs(this.forwardSpeed);
+    const latMag = Math.abs(this.lateralSpeed);
+    const turnMag = Math.abs(this.turnRate);
+    const anyCommand = fwdMag > 0.05 || latMag > 0.05 || turnMag > 0.05;
+    const ampScale = anyCommand
+      ? Math.max(0.25, fwdMag + latMag * 0.4 + turnMag * 0.3) : 0;
     const direction = Math.sign(this.forwardSpeed) || 1;
 
     // Get trunk orientation for balance
@@ -165,8 +156,7 @@ export class H1CpgController {
     this.prevPitch = pitch;
     this.prevRoll = roll;
 
-    // PD gains — must be high enough to resist gravity on 47kg robot
-    // Knee gravity torque ~120 Nm, hip ~60 Nm
+    // PD gains
     const hipKp = 800, hipKd = 30;
     const kneeKp = 1200, kneeKd = 40;
     const ankleKp = 200, ankleKd = 10;
@@ -177,7 +167,7 @@ export class H1CpgController {
 
     // --- LEFT LEG ---
     const leftSwing = Math.sin(leftPhase);
-    const leftStance = Math.max(0, -Math.sin(leftPhase)); // Positive during stance
+    const leftStance = Math.max(0, -Math.sin(leftPhase));
 
     const leftHipPitchTarget = this.homeQpos.left_hip_pitch
       + direction * this.hipPitchAmp * ampScale * leftSwing;
@@ -186,10 +176,10 @@ export class H1CpgController {
     const leftAnkleTarget = this.homeQpos.left_ankle
       - this.ankleAmp * ampScale * leftSwing;
     const leftHipRollTarget = this.homeQpos.left_hip_roll
-      - this.hipRollAmp * leftStance  // Lean into stance leg
-      + this.lateralSpeed * 0.05;
+      - this.hipRollAmp * leftStance
+      + this.lateralSpeed * 0.12;
     const leftHipYawTarget = this.homeQpos.left_hip_yaw
-      + this.turnRate * 0.05 * leftSwing;
+      + this.turnRate * 0.10 * leftSwing;
 
     ctrl[this.actIdx.left_hip_yaw] = this.pdTorque('left_hip_yaw', leftHipYawTarget, hipKp, hipKd);
     ctrl[this.actIdx.left_hip_roll] = this.pdTorque('left_hip_roll', leftHipRollTarget, hipKp, hipKd);
@@ -209,9 +199,9 @@ export class H1CpgController {
       - this.ankleAmp * ampScale * rightSwing;
     const rightHipRollTarget = this.homeQpos.right_hip_roll
       + this.hipRollAmp * rightStance
-      + this.lateralSpeed * 0.05;
+      + this.lateralSpeed * 0.12;
     const rightHipYawTarget = this.homeQpos.right_hip_yaw
-      + this.turnRate * 0.05 * rightSwing;
+      + this.turnRate * 0.10 * rightSwing;
 
     ctrl[this.actIdx.right_hip_yaw] = this.pdTorque('right_hip_yaw', rightHipYawTarget, hipKp, hipKd);
     ctrl[this.actIdx.right_hip_roll] = this.pdTorque('right_hip_roll', rightHipRollTarget, hipKp, hipKd);
@@ -220,23 +210,17 @@ export class H1CpgController {
     ctrl[this.actIdx.right_ankle] = this.pdTorque('right_ankle', rightAnkleTarget, ankleKp, ankleKd);
 
     // --- TORSO ---
-    // Keep torso upright, with yaw control
-    const torsoTarget = this.homeQpos.torso + this.turnRate * 0.1;
+    const torsoTarget = this.homeQpos.torso + this.turnRate * 0.2;
     ctrl[this.actIdx.torso] = this.pdTorque('torso', torsoTarget, torsoKp, torsoKd);
 
     // --- BALANCE CORRECTIONS ---
     const pitchCorrection = -this.balanceKp * pitch - this.balanceKd * pitchRate;
     const rollCorrection = -this.balanceKp * roll - this.balanceKd * rollRate;
 
-    // Ankle strategy (primary): ankle torque shifts center of pressure
     ctrl[this.actIdx.left_ankle] += pitchCorrection * 0.4;
     ctrl[this.actIdx.right_ankle] += pitchCorrection * 0.4;
-
-    // Hip strategy (secondary): hip torque for larger perturbations
     ctrl[this.actIdx.left_hip_pitch] += pitchCorrection * 0.5;
     ctrl[this.actIdx.right_hip_pitch] += pitchCorrection * 0.5;
-
-    // Roll corrections via hip roll
     ctrl[this.actIdx.left_hip_roll] += rollCorrection * 0.3;
     ctrl[this.actIdx.right_hip_roll] -= rollCorrection * 0.3;
 
@@ -262,7 +246,7 @@ export class H1CpgController {
     ctrl[this.actIdx.right_elbow] = this.pdTorque('right_elbow',
       this.homeQpos.right_elbow, armKp, armKd);
 
-    // Clamp all controls to their ranges
+    // Clamp all controls
     if (this.model.actuator_ctrlrange) {
       for (let i = 0; i < this.model.nu; i++) {
         const lo = this.model.actuator_ctrlrange[i * 2];

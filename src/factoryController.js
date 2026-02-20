@@ -126,7 +126,12 @@ class SingleRobotCPG {
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
 
-    const ampScale = Math.abs(this.forwardSpeed);
+    const fwdMag = Math.abs(this.forwardSpeed);
+    const latMag = Math.abs(this.lateralSpeed);
+    const turnMag = Math.abs(this.turnRate);
+    const anyCommand = fwdMag > 0.05 || latMag > 0.05 || turnMag > 0.05;
+    const ampScale = anyCommand
+      ? Math.max(0.3, fwdMag + latMag * 0.5 + turnMag * 0.3) : 0;
     const direction = Math.sign(this.forwardSpeed) || 1;
 
     const { pitch, roll } = this.getTrunkOrientation();
@@ -159,14 +164,14 @@ class SingleRobotCPG {
 
       const thighTarget = this.homeThigh
         - direction * this.thighAmp * ampScale * swing
-        + this.turnRate * 0.06 * turnSign * side;
+        + this.turnRate * 0.15 * turnSign * side;
 
       const calfTarget = this.homeCalf
         - this.calfAmp * ampScale * (isSwing ? Math.sin(legPhase) : 0);
 
       const hipTarget = this.homeHip
         + side * this.hipAmp * (isSwing ? 1 : -1) * ampScale
-        + this.lateralSpeed * 0.08 * side;
+        + this.lateralSpeed * 0.25 * side;
 
       const hipJoint = `${p}${legName}_hip_joint`;
       const thighJoint = `${p}${legName}_thigh_joint`;

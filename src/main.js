@@ -594,18 +594,18 @@ function handleInput() {
   // Keyboard
   if (kbFwd) fwd = 0.8;
   if (kbBack) fwd = -0.4;
-  if (kbLeft) lat = 0.3;
-  if (kbRight) lat = -0.3;
-  if (kbRotL) turn = 0.5;
-  if (kbRotR) turn = -0.5;
+  if (kbLeft) lat = 0.4;
+  if (kbRight) lat = -0.4;
+  if (kbRotL) turn = 0.7;
+  if (kbRotR) turn = -0.7;
 
   // Touch joystick override
   if (Math.abs(touchY) > 0.15 || Math.abs(touchX) > 0.15) {
     fwd = touchY * 0.8;
-    lat = -touchX * 0.3;
+    lat = -touchX * 0.4;
   }
-  if (touchRotL) turn = 0.5;
-  if (touchRotR) turn = -0.5;
+  if (touchRotL) turn = 0.7;
+  if (touchRotR) turn = -0.7;
 
   // Send commands to active controller
   const ctrl = getActiveCtrl();
