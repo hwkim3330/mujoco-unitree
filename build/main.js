@@ -2305,7 +2305,7 @@ function tournamentSelect(population, fitnesses, k = 3) {
   }
   return population[bestIdx];
 }
-var EvolutionController = class {
+var EvolutionController = class _EvolutionController {
   /**
    * @param {string} robotType - 'quadruped' or 'humanoid'
    * @param {number} populationSize - number of robots
@@ -2484,6 +2484,62 @@ var EvolutionController = class {
       min: g.min,
       max: g.max
     }));
+  }
+  // ─── Persistence (localStorage) ─────────────────────────────────
+  static STORAGE_KEY = "mujoco-evo-h1";
+  /**
+   * Serialize GA state to a plain object for JSON storage.
+   */
+  serialize() {
+    return {
+      robotType: this.robotType,
+      generation: this.generation,
+      bestEverFitness: this.bestEverFitness,
+      bestEverGenome: this.bestEverGenome ? [...this.bestEverGenome] : null,
+      population: this.population.map((g) => [...g]),
+      history: this.history.slice(-200)
+      // keep last 200 gens
+    };
+  }
+  /**
+   * Restore GA state from a serialized object.
+   * Returns true if successfully restored.
+   */
+  deserialize(saved) {
+    if (!saved || saved.robotType !== this.robotType) return false;
+    if (!saved.population || saved.population.length !== this.populationSize) return false;
+    if (!saved.population[0] || saved.population[0].length !== this.geneDefs.length) return false;
+    this.generation = saved.generation || 0;
+    this.bestEverFitness = saved.bestEverFitness ?? -Infinity;
+    this.bestEverGenome = saved.bestEverGenome ? [...saved.bestEverGenome] : null;
+    this.population = saved.population.map((g) => [...g]);
+    this.history = saved.history || [];
+    return true;
+  }
+  /**
+   * Save current state to localStorage.
+   */
+  save() {
+    try {
+      const json = JSON.stringify(this.serialize());
+      localStorage.setItem(_EvolutionController.STORAGE_KEY, json);
+    } catch (e) {
+      console.warn("Evolution save failed:", e);
+    }
+  }
+  /**
+   * Load state from localStorage. Returns true if restored.
+   */
+  load() {
+    try {
+      const raw = localStorage.getItem(_EvolutionController.STORAGE_KEY);
+      if (!raw) return false;
+      const saved = JSON.parse(raw);
+      return this.deserialize(saved);
+    } catch (e) {
+      console.warn("Evolution load failed:", e);
+      return false;
+    }
   }
 };
 
@@ -2739,6 +2795,10 @@ var EvolutionRunner = class {
     const dt = model2.opt.timestep || 2e-3;
     this.evalSteps = Math.round(evalSeconds / dt);
     this.evo = new EvolutionController("humanoid", numRobots, this.evalSteps);
+    const restored = this.evo.load();
+    if (restored) {
+      console.log(`Evolution restored: Gen ${this.evo.generation}, Best: ${this.evo.bestEverFitness.toFixed(1)}`);
+    }
     this.robots = [];
     for (let i = 0; i < numRobots; i++) {
       this.robots.push(new SingleH1CPG(mujoco2, model2, data2, `r${i}_`, i));
@@ -2819,6 +2879,7 @@ var EvolutionRunner = class {
         `Gen ${this.evo.generation}: best=${result.bestFit.toFixed(1)}, avg=${result.avg.toFixed(1)}, worst=${result.worst.toFixed(1)}`
       );
       this.evo.evolve();
+      this.evo.save();
       this.resetRobots();
       this.applyGenomes();
       this.startEvaluation();
@@ -2979,7 +3040,7 @@ var evolveRunner = null;
 var paused = false;
 var cameraFollow = true;
 var simSpeed = 1;
-var SIM_SPEEDS = [0.25, 0.5, 1, 2, 4];
+var SIM_SPEEDS = [0.25, 0.5, 1, 2, 4, 8, 16];
 var keys = {};
 var touchX = 0;
 var touchY = 0;
@@ -3200,11 +3261,17 @@ async function loadScene(sceneKey) {
   factoryController = null;
   evolveRunner = null;
   stepCounter = 0;
+  if (cfg.controller !== "evolve" && simSpeed > 4) {
+    simSpeed = 1;
+    updateSpeedBtn();
+  }
   model.opt.iterations = 30;
   if (cfg.controller === "evolve") {
     evolveRunner = new EvolutionRunner(mujoco, model, data, cfg.numRobots, cfg.evalSeconds);
     evolveRunner.enabled = true;
     activeController = "evolve";
+    simSpeed = 8;
+    updateSpeedBtn();
   } else if (cfg.controller === "go2") {
     go2Controller = new Go2CpgController(mujoco, model, data);
     go2Controller.enabled = true;
@@ -3646,7 +3713,7 @@ function setupControls() {
     console.error(e);
     return;
   }
-  const MAX_SUBSTEPS = 40;
+  const MAX_SUBSTEPS = 160;
   async function animate() {
     if (model && data && !paused) {
       handleInput();

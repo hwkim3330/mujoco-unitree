@@ -72,7 +72,7 @@ let evolveRunner = null;
 let paused = false;
 let cameraFollow = true;
 let simSpeed = 1.0;
-const SIM_SPEEDS = [0.25, 0.5, 1.0, 2.0, 4.0];
+const SIM_SPEEDS = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
 
 // Keyboard state
 const keys = {};
@@ -328,12 +328,21 @@ async function loadScene(sceneKey) {
   evolveRunner = null;
   stepCounter = 0;
 
+  // Reset turbo speed when leaving evolution mode
+  if (cfg.controller !== 'evolve' && simSpeed > 4.0) {
+    simSpeed = 1.0;
+    updateSpeedBtn();
+  }
+
   model.opt.iterations = 30;
 
   if (cfg.controller === 'evolve') {
     evolveRunner = new EvolutionRunner(mujoco, model, data, cfg.numRobots, cfg.evalSeconds);
     evolveRunner.enabled = true;
     activeController = 'evolve';
+    // Auto-turbo: set 8x speed for faster evolution
+    simSpeed = 8.0;
+    updateSpeedBtn();
   } else if (cfg.controller === 'go2') {
     go2Controller = new Go2CpgController(mujoco, model, data);
     go2Controller.enabled = true;
@@ -785,7 +794,7 @@ function setupControls() {
     return;
   }
 
-  const MAX_SUBSTEPS = 40;
+  const MAX_SUBSTEPS = 160; // up to 16x speed
 
   async function animate() {
     if (model && data && !paused) {

@@ -279,6 +279,12 @@ export class EvolutionRunner {
     // Create GA controller
     this.evo = new EvolutionController('humanoid', numRobots, this.evalSteps);
 
+    // Try to restore saved state
+    const restored = this.evo.load();
+    if (restored) {
+      console.log(`Evolution restored: Gen ${this.evo.generation}, Best: ${this.evo.bestEverFitness.toFixed(1)}`);
+    }
+
     // Create N independent CPG controllers
     this.robots = [];
     for (let i = 0; i < numRobots; i++) {
@@ -389,6 +395,9 @@ export class EvolutionRunner {
 
       // Evolve
       this.evo.evolve();
+
+      // Auto-save to localStorage
+      this.evo.save();
 
       // Reset and start next generation
       this.resetRobots();

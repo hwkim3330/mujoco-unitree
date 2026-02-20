@@ -303,4 +303,66 @@ export class EvolutionController {
       max: g.max,
     }));
   }
+
+  // ─── Persistence (localStorage) ─────────────────────────────────
+
+  static STORAGE_KEY = 'mujoco-evo-h1';
+
+  /**
+   * Serialize GA state to a plain object for JSON storage.
+   */
+  serialize() {
+    return {
+      robotType: this.robotType,
+      generation: this.generation,
+      bestEverFitness: this.bestEverFitness,
+      bestEverGenome: this.bestEverGenome ? [...this.bestEverGenome] : null,
+      population: this.population.map(g => [...g]),
+      history: this.history.slice(-200), // keep last 200 gens
+    };
+  }
+
+  /**
+   * Restore GA state from a serialized object.
+   * Returns true if successfully restored.
+   */
+  deserialize(saved) {
+    if (!saved || saved.robotType !== this.robotType) return false;
+    if (!saved.population || saved.population.length !== this.populationSize) return false;
+    if (!saved.population[0] || saved.population[0].length !== this.geneDefs.length) return false;
+
+    this.generation = saved.generation || 0;
+    this.bestEverFitness = saved.bestEverFitness ?? -Infinity;
+    this.bestEverGenome = saved.bestEverGenome ? [...saved.bestEverGenome] : null;
+    this.population = saved.population.map(g => [...g]);
+    this.history = saved.history || [];
+    return true;
+  }
+
+  /**
+   * Save current state to localStorage.
+   */
+  save() {
+    try {
+      const json = JSON.stringify(this.serialize());
+      localStorage.setItem(EvolutionController.STORAGE_KEY, json);
+    } catch (e) {
+      console.warn('Evolution save failed:', e);
+    }
+  }
+
+  /**
+   * Load state from localStorage. Returns true if restored.
+   */
+  load() {
+    try {
+      const raw = localStorage.getItem(EvolutionController.STORAGE_KEY);
+      if (!raw) return false;
+      const saved = JSON.parse(raw);
+      return this.deserialize(saved);
+    } catch (e) {
+      console.warn('Evolution load failed:', e);
+      return false;
+    }
+  }
 }
