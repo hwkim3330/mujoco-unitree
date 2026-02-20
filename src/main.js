@@ -641,6 +641,11 @@ window.addEventListener('keydown', (e) => {
     helpOverlay.style.display = helpOverlay.style.display === 'none' ? '' : 'none';
   }
   if (e.code === 'KeyF') spawnObstacle(Math.random() < 0.5 ? 'ball' : 'box');
+  // Trick keys (Go2 CPG only)
+  if (e.code === 'Digit1') { const c = getActiveCtrl(); if (c?.triggerTrick) c.triggerTrick('jump'); }
+  if (e.code === 'Digit2') { const c = getActiveCtrl(); if (c?.triggerTrick) c.triggerTrick('frontflip'); }
+  if (e.code === 'Digit3') { const c = getActiveCtrl(); if (c?.triggerTrick) c.triggerTrick('backflip'); }
+  if (e.code === 'Digit4') { const c = getActiveCtrl(); if (c?.triggerTrick) c.triggerTrick('sideroll'); }
   if (e.code === 'BracketRight') {
     const idx = SIM_SPEEDS.indexOf(simSpeed);
     if (idx < SIM_SPEEDS.length - 1) { simSpeed = SIM_SPEEDS[idx + 1]; updateSpeedBtn(); }
