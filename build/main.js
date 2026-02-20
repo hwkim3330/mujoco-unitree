@@ -30477,6 +30477,491 @@ var G1CpgController = class {
   }
 };
 
+// src/g1OnnxController.js
+var G1OnnxController = class {
+  constructor(mujoco2, model2, data2) {
+    this.mujoco = mujoco2;
+    this.model = model2;
+    this.data = data2;
+    this.enabled = false;
+    this.session = null;
+    this.simDt = model2.opt.timestep || 2e-3;
+    this.numJoints = 29;
+    this.decimation = 10;
+    this.stepCount = 0;
+    this.actionScale = 0.5;
+    this.defaultAngles = new Float32Array([
+      -0.312,
+      0,
+      0,
+      0.669,
+      -0.363,
+      0,
+      // left leg
+      -0.312,
+      0,
+      0,
+      0.669,
+      -0.363,
+      0,
+      // right leg
+      0,
+      0,
+      0.073,
+      // waist
+      0.2,
+      0.2,
+      0,
+      0.6,
+      0,
+      0,
+      0,
+      // left arm
+      0.2,
+      -0.2,
+      0,
+      0.6,
+      0,
+      0,
+      0
+      // right arm
+    ]);
+    this.kp = new Float32Array(29);
+    this.kd = new Float32Array(29);
+    for (let i = 0; i < 29; i++) {
+      this.kp[i] = 75;
+      this.kd[i] = 2;
+    }
+    this.kp[4] = 20;
+    this.kd[4] = 1;
+    this.kp[10] = 20;
+    this.kd[10] = 1;
+    this.kp[5] = 2;
+    this.kd[5] = 0.2;
+    this.kp[11] = 2;
+    this.kd[11] = 0.2;
+    for (const i of [19, 20, 21, 26, 27, 28]) {
+      this.kp[i] = 2;
+      this.kd[i] = 0.2;
+    }
+    this.phase = [0, Math.PI];
+    this.gaitFreq = 1.5;
+    this.phaseDt = 2 * Math.PI * this.gaitFreq * (this.decimation * this.simDt);
+    this.lastAction = new Float32Array(29);
+    this.currentTargets = new Float32Array(29);
+    for (let i = 0; i < 29; i++) this.currentTargets[i] = this.defaultAngles[i];
+    this.forwardSpeed = 0;
+    this.lateralSpeed = 0;
+    this.turnRate = 0;
+    this.jntQpos = new Int32Array(29);
+    this.jntDof = new Int32Array(29);
+    this.findJointIndices();
+    this._inferring = false;
+  }
+  findJointIndices() {
+    const names = [
+      "left_hip_pitch_joint",
+      "left_hip_roll_joint",
+      "left_hip_yaw_joint",
+      "left_knee_joint",
+      "left_ankle_pitch_joint",
+      "left_ankle_roll_joint",
+      "right_hip_pitch_joint",
+      "right_hip_roll_joint",
+      "right_hip_yaw_joint",
+      "right_knee_joint",
+      "right_ankle_pitch_joint",
+      "right_ankle_roll_joint",
+      "waist_yaw_joint",
+      "waist_roll_joint",
+      "waist_pitch_joint",
+      "left_shoulder_pitch_joint",
+      "left_shoulder_roll_joint",
+      "left_shoulder_yaw_joint",
+      "left_elbow_joint",
+      "left_wrist_roll_joint",
+      "left_wrist_pitch_joint",
+      "left_wrist_yaw_joint",
+      "right_shoulder_pitch_joint",
+      "right_shoulder_roll_joint",
+      "right_shoulder_yaw_joint",
+      "right_elbow_joint",
+      "right_wrist_roll_joint",
+      "right_wrist_pitch_joint",
+      "right_wrist_yaw_joint"
+    ];
+    for (let i = 0; i < 29; i++) {
+      try {
+        const jid = this.mujoco.mj_name2id(this.model, 3, names[i]);
+        if (jid >= 0) {
+          this.jntQpos[i] = this.model.jnt_qposadr[jid];
+          this.jntDof[i] = this.model.jnt_dofadr[jid];
+        }
+      } catch (e) {
+      }
+    }
+  }
+  async loadModel(modelPath) {
+    if (typeof ort === "undefined") {
+      console.warn("ONNX Runtime Web not loaded");
+      return false;
+    }
+    try {
+      this.session = await ort.InferenceSession.create(modelPath);
+      console.log("G1 ONNX policy loaded:", modelPath);
+      return true;
+    } catch (e) {
+      console.error("Failed to load G1 ONNX model:", e);
+      return false;
+    }
+  }
+  setCommand(forward, lateral, turn) {
+    this.forwardSpeed = Math.max(-1, Math.min(1, forward));
+    this.lateralSpeed = Math.max(-0.5, Math.min(0.5, lateral));
+    this.turnRate = Math.max(-1, Math.min(1, turn));
+  }
+  setInitialPose() {
+    for (let i = 0; i < 29; i++) {
+      this.data.qpos[this.jntQpos[i]] = this.defaultAngles[i];
+    }
+    this.data.qpos[2] = 0.755;
+    for (let i = 0; i < this.model.nv; i++) this.data.qvel[i] = 0;
+    this.mujoco.mj_forward(this.model, this.data);
+  }
+  // Rotate vector by inverse of body quaternion (world→body frame)
+  rotateByInvQuat(vx, vy, vz) {
+    const qw = this.data.qpos[3];
+    const qx = this.data.qpos[4];
+    const qy = this.data.qpos[5];
+    const qz = this.data.qpos[6];
+    const iqx = -qx, iqy = -qy, iqz = -qz;
+    const tx = 2 * (iqy * vz - iqz * vy);
+    const ty = 2 * (iqz * vx - iqx * vz);
+    const tz = 2 * (iqx * vy - iqy * vx);
+    return [
+      vx + qw * tx + (iqy * tz - iqz * ty),
+      vy + qw * ty + (iqz * tx - iqx * tz),
+      vz + qw * tz + (iqx * ty - iqy * tx)
+    ];
+  }
+  buildObs() {
+    const obs = new Float32Array(103);
+    const linvel = this.rotateByInvQuat(this.data.qvel[0], this.data.qvel[1], this.data.qvel[2]);
+    obs[0] = linvel[0];
+    obs[1] = linvel[1];
+    obs[2] = linvel[2];
+    const gyro = this.rotateByInvQuat(this.data.qvel[3], this.data.qvel[4], this.data.qvel[5]);
+    obs[3] = gyro[0];
+    obs[4] = gyro[1];
+    obs[5] = gyro[2];
+    const grav = this.rotateByInvQuat(0, 0, -1);
+    obs[6] = grav[0];
+    obs[7] = grav[1];
+    obs[8] = grav[2];
+    obs[9] = this.forwardSpeed;
+    obs[10] = this.lateralSpeed;
+    obs[11] = this.turnRate;
+    for (let i = 0; i < 29; i++) {
+      obs[12 + i] = this.data.qpos[this.jntQpos[i]] - this.defaultAngles[i];
+    }
+    for (let i = 0; i < 29; i++) {
+      obs[41 + i] = this.data.qvel[this.jntDof[i]];
+    }
+    for (let i = 0; i < 29; i++) {
+      obs[70 + i] = this.lastAction[i];
+    }
+    obs[99] = Math.cos(this.phase[0]);
+    obs[100] = Math.cos(this.phase[1]);
+    obs[101] = Math.sin(this.phase[0]);
+    obs[102] = Math.sin(this.phase[1]);
+    for (let i = 0; i < 103; i++) {
+      obs[i] = Math.max(-100, Math.min(100, obs[i]));
+    }
+    return obs;
+  }
+  applyPD() {
+    const ctrl = this.data.ctrl;
+    for (let i = 0; i < 29; i++) {
+      const q = this.data.qpos[this.jntQpos[i]];
+      const qdot = this.data.qvel[this.jntDof[i]];
+      const torque = this.kp[i] * (this.currentTargets[i] - q) - this.kd[i] * qdot;
+      ctrl[i] = torque;
+    }
+    if (this.model.actuator_ctrlrange) {
+      for (let i = 0; i < this.model.nu; i++) {
+        const lo = this.model.actuator_ctrlrange[i * 2];
+        const hi = this.model.actuator_ctrlrange[i * 2 + 1];
+        ctrl[i] = Math.max(lo, Math.min(hi, ctrl[i]));
+      }
+    }
+  }
+  step() {
+    if (!this.enabled) return;
+    this.applyPD();
+    this.stepCount++;
+    if (this.stepCount % this.decimation !== 0) return;
+    if (!this.session || this._inferring) return;
+    this._runInference();
+  }
+  async _runInference() {
+    this._inferring = true;
+    try {
+      const obs = this.buildObs();
+      const input = new ort.Tensor("float32", obs, [1, 103]);
+      const results = await this.session.run({ obs: input });
+      const actions = results.continuous_actions.data;
+      for (let i = 0; i < 29; i++) {
+        const a = Math.max(-5, Math.min(5, actions[i]));
+        this.lastAction[i] = a;
+        this.currentTargets[i] = a * this.actionScale + this.defaultAngles[i];
+      }
+      this.phase[0] = (this.phase[0] + this.phaseDt + Math.PI) % (2 * Math.PI) - Math.PI;
+      this.phase[1] = (this.phase[1] + this.phaseDt + Math.PI) % (2 * Math.PI) - Math.PI;
+    } catch (e) {
+      console.error("G1 ONNX inference error:", e);
+    }
+    this._inferring = false;
+  }
+  reset() {
+    this.stepCount = 0;
+    this.lastAction.fill(0);
+    for (let i = 0; i < 29; i++) this.currentTargets[i] = this.defaultAngles[i];
+    this.phase = [0, Math.PI];
+    this.forwardSpeed = 0;
+    this.lateralSpeed = 0;
+    this.turnRate = 0;
+    this._inferring = false;
+  }
+};
+
+// src/h1OnnxController.js
+var H1OnnxController = class {
+  constructor(mujoco2, model2, data2) {
+    this.mujoco = mujoco2;
+    this.model = model2;
+    this.data = data2;
+    this.enabled = false;
+    this.session = null;
+    this.simDt = model2.opt.timestep || 2e-3;
+    this.numJoints = 10;
+    this.decimation = 10;
+    this.stepCount = 0;
+    this.actionScale = 0.25;
+    this.defaultAngles = new Float32Array([
+      0,
+      0,
+      -0.4,
+      0.8,
+      -0.4,
+      0,
+      0,
+      -0.4,
+      0.8,
+      -0.4
+    ]);
+    this.kp = new Float32Array([
+      150,
+      150,
+      200,
+      200,
+      40,
+      // left leg
+      150,
+      150,
+      200,
+      200,
+      40
+      // right leg
+    ]);
+    this.kd = new Float32Array([
+      5,
+      5,
+      5,
+      5,
+      2,
+      // left leg
+      5,
+      5,
+      5,
+      5,
+      2
+      // right leg
+    ]);
+    this.phase = 0;
+    this.gaitFreq = 1.25;
+    this.ctrlDt = this.decimation * this.simDt;
+    this.hiddenSize = 64;
+    this.h0 = new Float32Array(this.hiddenSize);
+    this.c0 = new Float32Array(this.hiddenSize);
+    this.lastAction = new Float32Array(10);
+    this.currentTargets = new Float32Array(10);
+    for (let i = 0; i < 10; i++) this.currentTargets[i] = this.defaultAngles[i];
+    this.forwardSpeed = 0;
+    this.lateralSpeed = 0;
+    this.turnRate = 0;
+    this.jntQpos = new Int32Array(10);
+    this.jntDof = new Int32Array(10);
+    this.findJointIndices();
+    this._inferring = false;
+  }
+  findJointIndices() {
+    const names = [
+      "left_hip_yaw",
+      "left_hip_roll",
+      "left_hip_pitch",
+      "left_knee",
+      "left_ankle",
+      "right_hip_yaw",
+      "right_hip_roll",
+      "right_hip_pitch",
+      "right_knee",
+      "right_ankle"
+    ];
+    for (let i = 0; i < 10; i++) {
+      try {
+        const jid = this.mujoco.mj_name2id(this.model, 3, names[i]);
+        if (jid >= 0) {
+          this.jntQpos[i] = this.model.jnt_qposadr[jid];
+          this.jntDof[i] = this.model.jnt_dofadr[jid];
+        }
+      } catch (e) {
+      }
+    }
+  }
+  async loadModel(modelPath) {
+    if (typeof ort === "undefined") {
+      console.warn("ONNX Runtime Web not loaded");
+      return false;
+    }
+    try {
+      this.session = await ort.InferenceSession.create(modelPath);
+      console.log("H1 ONNX policy loaded:", modelPath);
+      return true;
+    } catch (e) {
+      console.error("Failed to load H1 ONNX model:", e);
+      return false;
+    }
+  }
+  setCommand(forward, lateral, turn) {
+    this.forwardSpeed = Math.max(-1, Math.min(1, forward));
+    this.lateralSpeed = Math.max(-0.5, Math.min(0.5, lateral));
+    this.turnRate = Math.max(-1, Math.min(1, turn));
+  }
+  setInitialPose() {
+    for (let i = 0; i < 10; i++) {
+      this.data.qpos[this.jntQpos[i]] = this.defaultAngles[i];
+    }
+    this.data.qpos[2] = 1.06;
+    for (let i = 0; i < this.model.nv; i++) this.data.qvel[i] = 0;
+    this.mujoco.mj_forward(this.model, this.data);
+  }
+  // Rotate vector by inverse of body quaternion (world→body frame)
+  rotateByInvQuat(vx, vy, vz) {
+    const qw = this.data.qpos[3];
+    const qx = this.data.qpos[4];
+    const qy = this.data.qpos[5];
+    const qz = this.data.qpos[6];
+    const iqx = -qx, iqy = -qy, iqz = -qz;
+    const tx = 2 * (iqy * vz - iqz * vy);
+    const ty = 2 * (iqz * vx - iqx * vz);
+    const tz = 2 * (iqx * vy - iqy * vx);
+    return [
+      vx + qw * tx + (iqy * tz - iqz * ty),
+      vy + qw * ty + (iqz * tx - iqx * tz),
+      vz + qw * tz + (iqx * ty - iqy * tx)
+    ];
+  }
+  buildObs() {
+    const obs = new Float32Array(41);
+    const gyro = this.rotateByInvQuat(this.data.qvel[3], this.data.qvel[4], this.data.qvel[5]);
+    obs[0] = gyro[0];
+    obs[1] = gyro[1];
+    obs[2] = gyro[2];
+    const grav = this.rotateByInvQuat(0, 0, -1);
+    obs[3] = grav[0];
+    obs[4] = grav[1];
+    obs[5] = grav[2];
+    obs[6] = this.forwardSpeed;
+    obs[7] = this.lateralSpeed;
+    obs[8] = this.turnRate;
+    for (let i = 0; i < 10; i++) {
+      obs[9 + i] = this.data.qpos[this.jntQpos[i]] - this.defaultAngles[i];
+    }
+    for (let i = 0; i < 10; i++) {
+      obs[19 + i] = this.data.qvel[this.jntDof[i]];
+    }
+    for (let i = 0; i < 10; i++) {
+      obs[29 + i] = this.lastAction[i];
+    }
+    obs[39] = Math.sin(2 * Math.PI * this.phase);
+    obs[40] = Math.cos(2 * Math.PI * this.phase);
+    for (let i = 0; i < 41; i++) {
+      obs[i] = Math.max(-100, Math.min(100, obs[i]));
+    }
+    return obs;
+  }
+  applyPD() {
+    const ctrl = this.data.ctrl;
+    for (let i = 0; i < 10; i++) {
+      const q = this.data.qpos[this.jntQpos[i]];
+      const qdot = this.data.qvel[this.jntDof[i]];
+      const torque = this.kp[i] * (this.currentTargets[i] - q) - this.kd[i] * qdot;
+      ctrl[i] = torque;
+    }
+    if (this.model.actuator_ctrlrange) {
+      for (let i = 0; i < this.model.nu; i++) {
+        const lo = this.model.actuator_ctrlrange[i * 2];
+        const hi = this.model.actuator_ctrlrange[i * 2 + 1];
+        ctrl[i] = Math.max(lo, Math.min(hi, ctrl[i]));
+      }
+    }
+  }
+  step() {
+    if (!this.enabled) return;
+    this.applyPD();
+    this.stepCount++;
+    if (this.stepCount % this.decimation !== 0) return;
+    if (!this.session || this._inferring) return;
+    this._runInference();
+  }
+  async _runInference() {
+    this._inferring = true;
+    try {
+      const obs = this.buildObs();
+      const input = {
+        obs: new ort.Tensor("float32", obs, [1, 41]),
+        h0: new ort.Tensor("float32", this.h0, [1, 1, this.hiddenSize]),
+        c0: new ort.Tensor("float32", this.c0, [1, 1, this.hiddenSize])
+      };
+      const results = await this.session.run(input);
+      const actions = results.actions.data;
+      this.h0 = new Float32Array(results.h_out.data);
+      this.c0 = new Float32Array(results.c_out.data);
+      for (let i = 0; i < 10; i++) {
+        const a = Math.max(-5, Math.min(5, actions[i]));
+        this.lastAction[i] = a;
+        this.currentTargets[i] = a * this.actionScale + this.defaultAngles[i];
+      }
+      this.phase = (this.phase + this.gaitFreq * this.ctrlDt) % 1;
+    } catch (e) {
+      console.error("H1 ONNX inference error:", e);
+    }
+    this._inferring = false;
+  }
+  reset() {
+    this.stepCount = 0;
+    this.lastAction.fill(0);
+    for (let i = 0; i < 10; i++) this.currentTargets[i] = this.defaultAngles[i];
+    this.phase = 0;
+    this.h0 = new Float32Array(this.hiddenSize);
+    this.c0 = new Float32Array(this.hiddenSize);
+    this.forwardSpeed = 0;
+    this.lateralSpeed = 0;
+    this.turnRate = 0;
+    this._inferring = false;
+  }
+};
+
 // src/h1_2CpgController.js
 var IDLE4 = "idle";
 var CROUCH4 = "crouch";
@@ -30989,6 +31474,244 @@ var H1_2CpgController = class {
     this.prevRoll = 0;
     this._endTrick();
     this.qwopMode = false;
+  }
+};
+
+// src/h1_2OnnxController.js
+var H1_2OnnxController = class {
+  constructor(mujoco2, model2, data2) {
+    this.mujoco = mujoco2;
+    this.model = model2;
+    this.data = data2;
+    this.enabled = false;
+    this.session = null;
+    this.simDt = model2.opt.timestep || 2e-3;
+    this.numJoints = 12;
+    this.decimation = 10;
+    this.stepCount = 0;
+    this.actionScale = 0.25;
+    this.defaultAngles = new Float32Array([
+      0,
+      -0.4,
+      0,
+      0.8,
+      -0.4,
+      0,
+      // left leg
+      0,
+      -0.4,
+      0,
+      0.8,
+      -0.4,
+      0
+      // right leg
+    ]);
+    this.kp = new Float32Array([
+      150,
+      200,
+      150,
+      200,
+      40,
+      20,
+      // left leg
+      150,
+      200,
+      150,
+      200,
+      40,
+      20
+      // right leg
+    ]);
+    this.kd = new Float32Array([
+      5,
+      5,
+      5,
+      5,
+      2,
+      2,
+      // left leg
+      5,
+      5,
+      5,
+      5,
+      2,
+      2
+      // right leg
+    ]);
+    this.phase = 0;
+    this.gaitFreq = 1.25;
+    this.ctrlDt = this.decimation * this.simDt;
+    this.hiddenSize = 64;
+    this.h0 = new Float32Array(this.hiddenSize);
+    this.c0 = new Float32Array(this.hiddenSize);
+    this.lastAction = new Float32Array(12);
+    this.currentTargets = new Float32Array(12);
+    for (let i = 0; i < 12; i++) this.currentTargets[i] = this.defaultAngles[i];
+    this.forwardSpeed = 0;
+    this.lateralSpeed = 0;
+    this.turnRate = 0;
+    this.jntQpos = new Int32Array(12);
+    this.jntDof = new Int32Array(12);
+    this.findJointIndices();
+    this._inferring = false;
+  }
+  findJointIndices() {
+    const names = [
+      "left_hip_yaw_joint",
+      "left_hip_pitch_joint",
+      "left_hip_roll_joint",
+      "left_knee_joint",
+      "left_ankle_pitch_joint",
+      "left_ankle_roll_joint",
+      "right_hip_yaw_joint",
+      "right_hip_pitch_joint",
+      "right_hip_roll_joint",
+      "right_knee_joint",
+      "right_ankle_pitch_joint",
+      "right_ankle_roll_joint"
+    ];
+    for (let i = 0; i < 12; i++) {
+      try {
+        const jid = this.mujoco.mj_name2id(this.model, 3, names[i]);
+        if (jid >= 0) {
+          this.jntQpos[i] = this.model.jnt_qposadr[jid];
+          this.jntDof[i] = this.model.jnt_dofadr[jid];
+        }
+      } catch (e) {
+      }
+    }
+  }
+  async loadModel(modelPath) {
+    if (typeof ort === "undefined") {
+      console.warn("ONNX Runtime Web not loaded");
+      return false;
+    }
+    try {
+      this.session = await ort.InferenceSession.create(modelPath);
+      console.log("H1-2 ONNX policy loaded:", modelPath);
+      return true;
+    } catch (e) {
+      console.error("Failed to load H1-2 ONNX model:", e);
+      return false;
+    }
+  }
+  setCommand(forward, lateral, turn) {
+    this.forwardSpeed = Math.max(-1, Math.min(1, forward));
+    this.lateralSpeed = Math.max(-0.5, Math.min(0.5, lateral));
+    this.turnRate = Math.max(-1, Math.min(1, turn));
+  }
+  setInitialPose() {
+    for (let i = 0; i < 12; i++) {
+      this.data.qpos[this.jntQpos[i]] = this.defaultAngles[i];
+    }
+    this.data.qpos[2] = 1.03;
+    for (let i = 0; i < this.model.nv; i++) this.data.qvel[i] = 0;
+    this.mujoco.mj_forward(this.model, this.data);
+  }
+  // Rotate vector by inverse of body quaternion (world→body frame)
+  rotateByInvQuat(vx, vy, vz) {
+    const qw = this.data.qpos[3];
+    const qx = this.data.qpos[4];
+    const qy = this.data.qpos[5];
+    const qz = this.data.qpos[6];
+    const iqx = -qx, iqy = -qy, iqz = -qz;
+    const tx = 2 * (iqy * vz - iqz * vy);
+    const ty = 2 * (iqz * vx - iqx * vz);
+    const tz = 2 * (iqx * vy - iqy * vx);
+    return [
+      vx + qw * tx + (iqy * tz - iqz * ty),
+      vy + qw * ty + (iqz * tx - iqx * tz),
+      vz + qw * tz + (iqx * ty - iqy * tx)
+    ];
+  }
+  buildObs() {
+    const obs = new Float32Array(47);
+    const gyro = this.rotateByInvQuat(this.data.qvel[3], this.data.qvel[4], this.data.qvel[5]);
+    obs[0] = gyro[0];
+    obs[1] = gyro[1];
+    obs[2] = gyro[2];
+    const grav = this.rotateByInvQuat(0, 0, -1);
+    obs[3] = grav[0];
+    obs[4] = grav[1];
+    obs[5] = grav[2];
+    obs[6] = this.forwardSpeed;
+    obs[7] = this.lateralSpeed;
+    obs[8] = this.turnRate;
+    for (let i = 0; i < 12; i++) {
+      obs[9 + i] = this.data.qpos[this.jntQpos[i]] - this.defaultAngles[i];
+    }
+    for (let i = 0; i < 12; i++) {
+      obs[21 + i] = this.data.qvel[this.jntDof[i]];
+    }
+    for (let i = 0; i < 12; i++) {
+      obs[33 + i] = this.lastAction[i];
+    }
+    obs[45] = Math.sin(2 * Math.PI * this.phase);
+    obs[46] = Math.cos(2 * Math.PI * this.phase);
+    for (let i = 0; i < 47; i++) {
+      obs[i] = Math.max(-100, Math.min(100, obs[i]));
+    }
+    return obs;
+  }
+  applyPD() {
+    const ctrl = this.data.ctrl;
+    for (let i = 0; i < 12; i++) {
+      const q = this.data.qpos[this.jntQpos[i]];
+      const qdot = this.data.qvel[this.jntDof[i]];
+      const torque = this.kp[i] * (this.currentTargets[i] - q) - this.kd[i] * qdot;
+      ctrl[i] = torque;
+    }
+    if (this.model.actuator_ctrlrange) {
+      for (let i = 0; i < this.model.nu; i++) {
+        const lo = this.model.actuator_ctrlrange[i * 2];
+        const hi = this.model.actuator_ctrlrange[i * 2 + 1];
+        ctrl[i] = Math.max(lo, Math.min(hi, ctrl[i]));
+      }
+    }
+  }
+  step() {
+    if (!this.enabled) return;
+    this.applyPD();
+    this.stepCount++;
+    if (this.stepCount % this.decimation !== 0) return;
+    if (!this.session || this._inferring) return;
+    this._runInference();
+  }
+  async _runInference() {
+    this._inferring = true;
+    try {
+      const obs = this.buildObs();
+      const input = {
+        obs: new ort.Tensor("float32", obs, [1, 47]),
+        h0: new ort.Tensor("float32", this.h0, [1, 1, this.hiddenSize]),
+        c0: new ort.Tensor("float32", this.c0, [1, 1, this.hiddenSize])
+      };
+      const results = await this.session.run(input);
+      const actions = results.actions.data;
+      this.h0 = new Float32Array(results.h_out.data);
+      this.c0 = new Float32Array(results.c_out.data);
+      for (let i = 0; i < 12; i++) {
+        const a = Math.max(-5, Math.min(5, actions[i]));
+        this.lastAction[i] = a;
+        this.currentTargets[i] = a * this.actionScale + this.defaultAngles[i];
+      }
+      this.phase = (this.phase + this.gaitFreq * this.ctrlDt) % 1;
+    } catch (e) {
+      console.error("H1-2 ONNX inference error:", e);
+    }
+    this._inferring = false;
+  }
+  reset() {
+    this.stepCount = 0;
+    this.lastAction.fill(0);
+    for (let i = 0; i < 12; i++) this.currentTargets[i] = this.defaultAngles[i];
+    this.phase = 0;
+    this.h0 = new Float32Array(this.hiddenSize);
+    this.c0 = new Float32Array(this.hiddenSize);
+    this.forwardSpeed = 0;
+    this.lateralSpeed = 0;
+    this.turnRate = 0;
+    this._inferring = false;
   }
 };
 
@@ -32115,9 +32838,12 @@ var activeController = null;
 var go2Controller = null;
 var go2RlController = null;
 var h1Controller = null;
+var h1RlController = null;
 var b2Controller = null;
 var g1Controller = null;
+var g1RlController = null;
 var h1_2Controller = null;
+var h1_2RlController = null;
 var factoryController = null;
 var evolveRunner = null;
 var paused = false;
@@ -32167,6 +32893,12 @@ var SCENES = {
     controller: "h1",
     camera: { pos: [3, 2, 3], target: [0, 0.9, 0] }
   },
+  "unitree_h1/scene.xml|rl": {
+    controller: "h1rl",
+    scenePath: "unitree_h1/scene.xml",
+    onnxModel: "./assets/models/h1_walk_policy.onnx",
+    camera: { pos: [3, 2, 3], target: [0, 0.9, 0] }
+  },
   "unitree_h1/scene_stairs.xml": {
     controller: "h1",
     camera: { pos: [4, 2.5, 3.5], target: [2, 0.5, 0] }
@@ -32175,8 +32907,20 @@ var SCENES = {
     controller: "g1",
     camera: { pos: [2.5, 1.8, 2.5], target: [0, 0.7, 0] }
   },
+  "unitree_g1/scene.xml|rl": {
+    controller: "g1rl",
+    scenePath: "unitree_g1/scene.xml",
+    onnxModel: "./assets/models/g1_walk_policy.onnx",
+    camera: { pos: [2.5, 1.8, 2.5], target: [0, 0.7, 0] }
+  },
   "unitree_h1_2/scene.xml": {
     controller: "h1_2",
+    camera: { pos: [3, 2, 3], target: [0, 0.9, 0] }
+  },
+  "unitree_h1_2/scene.xml|rl": {
+    controller: "h1_2rl",
+    scenePath: "unitree_h1_2/scene.xml",
+    onnxModel: "./assets/models/h1_2_walk_policy.onnx",
     camera: { pos: [3, 2, 3], target: [0, 0.9, 0] }
   },
   "unitree_go2/scene_factory": {
@@ -32338,9 +33082,12 @@ async function loadScene(sceneKey) {
   go2Controller = null;
   go2RlController = null;
   h1Controller = null;
+  h1RlController = null;
   b2Controller = null;
   g1Controller = null;
+  g1RlController = null;
   h1_2Controller = null;
+  h1_2RlController = null;
   factoryController = null;
   evolveRunner = null;
   stepCounter = 0;
@@ -32401,6 +33148,28 @@ async function loadScene(sceneKey) {
       mujoco.mj_step(model, data);
     }
     activeController = "h1";
+  } else if (cfg.controller === "h1rl") {
+    h1RlController = new H1OnnxController(mujoco, model, data);
+    setStatus("Loading H1 RL policy...");
+    const loaded2 = await h1RlController.loadModel(cfg.onnxModel);
+    if (loaded2) {
+      h1RlController.setInitialPose();
+      h1RlController.enabled = true;
+      for (let i = 0; i < 500; i++) {
+        h1RlController.applyPD();
+        mujoco.mj_step(model, data);
+      }
+      activeController = "h1rl";
+    } else {
+      setStatus("H1 RL load failed, falling back to CPG");
+      h1Controller = new H1CpgController(mujoco, model, data);
+      h1Controller.enabled = true;
+      for (let i = 0; i < 500; i++) {
+        h1Controller.step();
+        mujoco.mj_step(model, data);
+      }
+      activeController = "h1";
+    }
   } else if (cfg.controller === "g1") {
     g1Controller = new G1CpgController(mujoco, model, data);
     g1Controller.setStandingPose();
@@ -32411,6 +33180,30 @@ async function loadScene(sceneKey) {
       mujoco.mj_step(model, data);
     }
     activeController = "g1";
+  } else if (cfg.controller === "g1rl") {
+    g1RlController = new G1OnnxController(mujoco, model, data);
+    setStatus("Loading G1 RL policy...");
+    const loaded2 = await g1RlController.loadModel(cfg.onnxModel);
+    if (loaded2) {
+      g1RlController.setInitialPose();
+      g1RlController.enabled = true;
+      for (let i = 0; i < 500; i++) {
+        g1RlController.applyPD();
+        mujoco.mj_step(model, data);
+      }
+      activeController = "g1rl";
+    } else {
+      setStatus("G1 RL load failed, falling back to CPG");
+      g1Controller = new G1CpgController(mujoco, model, data);
+      g1Controller.setStandingPose();
+      mujoco.mj_forward(model, data);
+      g1Controller.enabled = true;
+      for (let i = 0; i < 500; i++) {
+        g1Controller.step();
+        mujoco.mj_step(model, data);
+      }
+      activeController = "g1";
+    }
   } else if (cfg.controller === "h1_2") {
     h1_2Controller = new H1_2CpgController(mujoco, model, data);
     for (const [name, target] of Object.entries(h1_2Controller.homeQpos)) {
@@ -32424,6 +33217,33 @@ async function loadScene(sceneKey) {
       mujoco.mj_step(model, data);
     }
     activeController = "h1_2";
+  } else if (cfg.controller === "h1_2rl") {
+    h1_2RlController = new H1_2OnnxController(mujoco, model, data);
+    setStatus("Loading H1-2 RL policy...");
+    const loaded2 = await h1_2RlController.loadModel(cfg.onnxModel);
+    if (loaded2) {
+      h1_2RlController.setInitialPose();
+      h1_2RlController.enabled = true;
+      for (let i = 0; i < 500; i++) {
+        h1_2RlController.applyPD();
+        mujoco.mj_step(model, data);
+      }
+      activeController = "h1_2rl";
+    } else {
+      setStatus("H1-2 RL load failed, falling back to CPG");
+      h1_2Controller = new H1_2CpgController(mujoco, model, data);
+      for (const [name, target] of Object.entries(h1_2Controller.homeQpos)) {
+        const idx = h1_2Controller.jntIdx[name];
+        if (idx !== void 0) data.qpos[idx] = target;
+      }
+      mujoco.mj_forward(model, data);
+      h1_2Controller.enabled = true;
+      for (let i = 0; i < 500; i++) {
+        h1_2Controller.step();
+        mujoco.mj_step(model, data);
+      }
+      activeController = "h1_2";
+    }
   } else if (cfg.controller === "factory") {
     factoryController = new FactoryController(mujoco, model, data, cfg.numRobots);
     factoryController.enabled = true;
@@ -32453,9 +33273,12 @@ function updateControllerBtn() {
     go2: () => go2Controller?.qwopMode ? "QWOP" : go2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
     go2rl: () => go2RlController?.enabled ? "RL: ON" : "RL: OFF",
     h1: () => h1Controller?.qwopMode ? "QWOP" : h1Controller?.enabled ? "CPG: ON" : "CPG: OFF",
+    h1rl: () => h1RlController?.enabled ? "RL: ON" : "RL: OFF",
     b2: () => b2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
     g1: () => g1Controller?.qwopMode ? "QWOP" : g1Controller?.enabled ? "CPG: ON" : "CPG: OFF",
+    g1rl: () => g1RlController?.enabled ? "RL: ON" : "RL: OFF",
     h1_2: () => h1_2Controller?.qwopMode ? "QWOP" : h1_2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
+    h1_2rl: () => h1_2RlController?.enabled ? "RL: ON" : "RL: OFF",
     factory: () => factoryController?.enabled ? `CPG: ON (${factoryController.numRobots}x)` : "CPG: OFF",
     evolve: () => evolveRunner?.enabled ? `EVO: ${evolveRunner.getStatusText()}` : "EVO: OFF"
   };
@@ -32514,6 +33337,15 @@ function resetScene() {
       mujoco.mj_step(model, data);
     }
   }
+  if (h1RlController) {
+    h1RlController.reset();
+    h1RlController.setInitialPose();
+    h1RlController.enabled = true;
+    for (let i = 0; i < 500; i++) {
+      h1RlController.applyPD();
+      mujoco.mj_step(model, data);
+    }
+  }
   if (g1Controller) {
     g1Controller.setStandingPose();
     mujoco.mj_forward(model, data);
@@ -32521,6 +33353,15 @@ function resetScene() {
     g1Controller.enabled = true;
     for (let i = 0; i < 500; i++) {
       g1Controller.step();
+      mujoco.mj_step(model, data);
+    }
+  }
+  if (g1RlController) {
+    g1RlController.reset();
+    g1RlController.setInitialPose();
+    g1RlController.enabled = true;
+    for (let i = 0; i < 500; i++) {
+      g1RlController.applyPD();
       mujoco.mj_step(model, data);
     }
   }
@@ -32534,6 +33375,15 @@ function resetScene() {
     h1_2Controller.enabled = true;
     for (let i = 0; i < 500; i++) {
       h1_2Controller.step();
+      mujoco.mj_step(model, data);
+    }
+  }
+  if (h1_2RlController) {
+    h1_2RlController.reset();
+    h1_2RlController.setInitialPose();
+    h1_2RlController.enabled = true;
+    for (let i = 0; i < 500; i++) {
+      h1_2RlController.applyPD();
       mujoco.mj_step(model, data);
     }
   }
@@ -32554,12 +33404,18 @@ function toggleController() {
     go2RlController.enabled = !go2RlController.enabled;
   } else if (activeController === "h1" && h1Controller) {
     h1Controller.enabled = !h1Controller.enabled;
+  } else if (activeController === "h1rl" && h1RlController) {
+    h1RlController.enabled = !h1RlController.enabled;
   } else if (activeController === "b2" && b2Controller) {
     b2Controller.enabled = !b2Controller.enabled;
   } else if (activeController === "g1" && g1Controller) {
     g1Controller.enabled = !g1Controller.enabled;
+  } else if (activeController === "g1rl" && g1RlController) {
+    g1RlController.enabled = !g1RlController.enabled;
   } else if (activeController === "h1_2" && h1_2Controller) {
     h1_2Controller.enabled = !h1_2Controller.enabled;
+  } else if (activeController === "h1_2rl" && h1_2RlController) {
+    h1_2RlController.enabled = !h1_2RlController.enabled;
   } else if (activeController === "factory" && factoryController) {
     factoryController.enabled = !factoryController.enabled;
   } else if (activeController === "evolve" && evolveRunner) {
@@ -32609,12 +33465,18 @@ function getActiveCtrl() {
       return go2RlController;
     case "h1":
       return h1Controller;
+    case "h1rl":
+      return h1RlController;
     case "b2":
       return b2Controller;
     case "g1":
       return g1Controller;
+    case "g1rl":
+      return g1RlController;
     case "h1_2":
       return h1_2Controller;
+    case "h1_2rl":
+      return h1_2RlController;
     case "factory":
       return factoryController;
     case "evolve":
