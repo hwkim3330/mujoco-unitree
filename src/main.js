@@ -449,10 +449,10 @@ function updateControllerBtn() {
   const labels = {
     go2: () => go2Controller?.qwopMode ? 'QWOP' : go2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
     go2rl: () => go2RlController?.enabled ? 'RL: ON' : 'RL: OFF',
-    h1: () => h1Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
+    h1: () => h1Controller?.qwopMode ? 'QWOP' : h1Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
     b2: () => b2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
-    g1: () => g1Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
-    h1_2: () => h1_2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
+    g1: () => g1Controller?.qwopMode ? 'QWOP' : g1Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
+    h1_2: () => h1_2Controller?.qwopMode ? 'QWOP' : h1_2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
     factory: () => factoryController?.enabled ? `CPG: ON (${factoryController.numRobots}x)` : 'CPG: OFF',
     evolve: () => evolveRunner?.enabled ? `EVO: ${evolveRunner.getStatusText()}` : 'EVO: OFF',
   };
@@ -647,12 +647,16 @@ window.addEventListener('keydown', (e) => {
     if (c && 'qwopMode' in c) {
       c.qwopMode = !c.qwopMode;
       if (c.qwopMode) c._endTrick?.();
-      setStatus(c.qwopMode ? 'QWOP Mode! Q/W=front thighs A/S=front calves I/O=rear thighs K/L=rear calves' : 'CPG Mode');
+      const isQuad = activeController === 'go2';
+      const hint = isQuad
+        ? 'QWOP Mode! Q/W=front thighs A/S=front calves I/O=rear thighs K/L=rear calves'
+        : 'QWOP Mode! Q/W=L/R hip A/S=L/R knee I/O=ankle K/L=arms Z/X=torso';
+      setStatus(c.qwopMode ? hint : 'CPG Mode');
       updateControllerBtn();
     }
   }
   if (e.code === 'KeyF') spawnObstacle(Math.random() < 0.5 ? 'ball' : 'box');
-  // Trick keys (Go2 CPG only)
+  // Trick keys (Go2: jump/flip/roll, Humanoids: jump/kick/wave/bow)
   if (e.code === 'Digit1') { const c = getActiveCtrl(); if (c?.triggerTrick) c.triggerTrick('jump'); }
   if (e.code === 'Digit2') { const c = getActiveCtrl(); if (c?.triggerTrick) c.triggerTrick('frontflip'); }
   if (e.code === 'Digit3') { const c = getActiveCtrl(); if (c?.triggerTrick) c.triggerTrick('backflip'); }

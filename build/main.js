@@ -29330,6 +29330,131 @@ var Go2OnnxController = class {
 };
 
 // src/h1CpgController.js
+var IDLE2 = "idle";
+var CROUCH2 = "crouch";
+var LAUNCH2 = "launch";
+var AIR2 = "air";
+var LAND2 = "land";
+var RECOVER2 = "recover";
+var GAIN_SCALE2 = {
+  [IDLE2]: { kp: 1, kd: 1 },
+  [CROUCH2]: { kp: 1.3, kd: 1 },
+  [LAUNCH2]: { kp: 1.8, kd: 0.5 },
+  [AIR2]: { kp: 0.4, kd: 0.6 },
+  [LAND2]: { kp: 1, kd: 2 },
+  [RECOVER2]: { kp: 1, kd: 1 }
+};
+var TRICKS2 = {
+  jump: [
+    { phase: CROUCH2, steps: 80, targets: {
+      left_hip_pitch: -1,
+      left_knee: 2,
+      left_ankle: -1,
+      right_hip_pitch: -1,
+      right_knee: 2,
+      right_ankle: -1
+    } },
+    { phase: LAUNCH2, steps: 50, targets: {
+      left_hip_pitch: 0.15,
+      left_knee: 0.05,
+      left_ankle: 0.05,
+      right_hip_pitch: 0.15,
+      right_knee: 0.05,
+      right_ankle: 0.05
+    } },
+    { phase: AIR2, steps: 200, targets: {
+      left_hip_pitch: -0.8,
+      left_knee: 1.6,
+      left_ankle: -0.8,
+      right_hip_pitch: -0.8,
+      right_knee: 1.6,
+      right_ankle: -0.8
+    } },
+    { phase: LAND2, steps: 60, targets: {
+      left_hip_pitch: -0.7,
+      left_knee: 1.4,
+      left_ankle: -0.7,
+      right_hip_pitch: -0.7,
+      right_knee: 1.4,
+      right_ankle: -0.7
+    } },
+    { phase: RECOVER2, steps: 120, targets: {} }
+  ],
+  kick: [
+    { phase: CROUCH2, steps: 60, targets: {
+      left_hip_roll: -0.12,
+      left_hip_pitch: -0.5,
+      left_knee: 1,
+      left_ankle: -0.5,
+      right_hip_pitch: -0.6,
+      right_knee: 1.2
+    } },
+    { phase: LAUNCH2, steps: 40, targets: {
+      left_hip_roll: -0.15,
+      right_hip_pitch: -1.5,
+      right_knee: 0.2,
+      right_ankle: -0.1
+    } },
+    { phase: AIR2, steps: 100, gains: { kp: 1.2, kd: 1 }, targets: {
+      left_hip_roll: -0.15,
+      right_hip_pitch: -1.5,
+      right_knee: 0.2,
+      right_ankle: -0.1
+    } },
+    { phase: LAND2, steps: 60, targets: {
+      right_hip_pitch: -0.5,
+      right_knee: 1,
+      right_ankle: -0.5
+    } },
+    { phase: RECOVER2, steps: 100, targets: {} }
+  ],
+  wave: [
+    { phase: CROUCH2, steps: 50, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch: -1.5,
+      right_shoulder_roll: -0.6,
+      right_elbow: -1
+    } },
+    { phase: LAUNCH2, steps: 30, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch: -1.5,
+      right_shoulder_roll: -0.1,
+      right_elbow: -0.8
+    } },
+    { phase: AIR2, steps: 30, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch: -1.5,
+      right_shoulder_roll: -0.6,
+      right_elbow: -1
+    } },
+    { phase: LAND2, steps: 30, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch: -1.5,
+      right_shoulder_roll: -0.1,
+      right_elbow: -0.8
+    } },
+    { phase: RECOVER2, steps: 80, gains: { kp: 1, kd: 1 }, targets: {} }
+  ],
+  bow: [
+    { phase: CROUCH2, steps: 80, gains: { kp: 1.2, kd: 1 }, targets: {
+      torso: 0.3,
+      left_hip_pitch: -0.8,
+      right_hip_pitch: -0.8,
+      left_shoulder_pitch: 0.5,
+      right_shoulder_pitch: 0.5,
+      left_shoulder_roll: 0.05,
+      right_shoulder_roll: -0.05
+    } },
+    { phase: LAUNCH2, steps: 100, gains: { kp: 1.2, kd: 1 }, targets: {
+      torso: 0.3,
+      left_hip_pitch: -0.8,
+      right_hip_pitch: -0.8,
+      left_shoulder_pitch: 0.5,
+      right_shoulder_pitch: 0.5,
+      left_shoulder_roll: 0.05,
+      right_shoulder_roll: -0.05
+    } },
+    { phase: AIR2, steps: 40, gains: { kp: 1, kd: 1 }, targets: {} },
+    { phase: LAND2, steps: 40, gains: { kp: 1, kd: 1 }, targets: {} },
+    { phase: RECOVER2, steps: 80, targets: {} }
+  ]
+};
 var H1CpgController = class {
   constructor(mujoco2, model2, data2) {
     this.mujoco = mujoco2;
@@ -29395,6 +29520,14 @@ var H1CpgController = class {
     this.turnRate = 0;
     this.prevPitch = 0;
     this.prevRoll = 0;
+    this.trickPhase = IDLE2;
+    this.trickName = null;
+    this.trickIdx = 0;
+    this.trickStep = 0;
+    this.trickStart = {};
+    this.qwopMode = false;
+    this.qwopKeys = {};
+    this.qwopDelta = 0.5;
   }
   findJointIndices() {
     const names = Object.keys(this.actIdx);
@@ -29437,8 +29570,117 @@ var H1CpgController = class {
     const qdot = this.data.qvel[dofIdx] || 0;
     return kp * (target - q) - kd * qdot;
   }
-  step() {
-    if (!this.enabled) return;
+  _gainsForJoint(name) {
+    if (name.includes("knee")) return [500, 20];
+    if (name.includes("ankle")) return [60, 4];
+    if (name.includes("hip")) return [350, 15];
+    if (name.includes("torso")) return [300, 12];
+    return [40, 2];
+  }
+  // ── Tricks ─────────────────────────────────────────────────────────
+  triggerTrick(name) {
+    if (this.trickPhase !== IDLE2 || !TRICKS2[name]) return;
+    this.trickName = name;
+    this.trickIdx = 0;
+    this.trickStep = 0;
+    this.trickPhase = TRICKS2[name][0].phase;
+    this._snapshotCurrentPose();
+    console.log(`H1 trick: ${name}`);
+  }
+  _snapshotCurrentPose() {
+    this.trickStart = {};
+    for (const name of Object.keys(this.actIdx)) {
+      const idx = this.jntIdx[name];
+      this.trickStart[name] = idx !== void 0 ? this.data.qpos[idx] : this.homeQpos[name] || 0;
+    }
+  }
+  _stepTrick() {
+    const seq = TRICKS2[this.trickName];
+    if (!seq) {
+      this.trickPhase = IDLE2;
+      return;
+    }
+    const spec = seq[this.trickIdx];
+    if (!spec) {
+      this._endTrick();
+      return;
+    }
+    this.trickStep++;
+    this.trickPhase = spec.phase;
+    const p = Math.min(1, this.trickStep / spec.steps);
+    const t = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+    const gs = spec.gains || GAIN_SCALE2[spec.phase];
+    const fullTarget = { ...this.homeQpos, ...spec.targets };
+    const ctrl = this.data.ctrl;
+    for (const [name, actI] of Object.entries(this.actIdx)) {
+      const start = this.trickStart[name] ?? this.homeQpos[name] ?? 0;
+      const end = fullTarget[name] ?? this.homeQpos[name] ?? 0;
+      const target = start + (end - start) * t;
+      const [kp, kd] = this._gainsForJoint(name);
+      ctrl[actI] = this.pdTorque(name, target, kp * gs.kp, kd * gs.kd);
+    }
+    if (spec.phase === AIR2 && this.trickStep > 40 && (this.trickName === "jump" || this.trickName === "kick")) {
+      const z = this.data.qpos[2];
+      const vz = this.data.qvel[2];
+      if (z < 1 && vz < -0.1) {
+        this._advanceTrick();
+        return;
+      }
+    }
+    if (this.trickStep >= spec.steps) this._advanceTrick();
+    this._clampCtrl();
+  }
+  _advanceTrick() {
+    this.trickIdx++;
+    this.trickStep = 0;
+    this._snapshotCurrentPose();
+    const seq = TRICKS2[this.trickName];
+    if (!seq || this.trickIdx >= seq.length) {
+      this._endTrick();
+    } else {
+      this.trickPhase = seq[this.trickIdx].phase;
+    }
+  }
+  _endTrick() {
+    this.trickPhase = IDLE2;
+    this.trickName = null;
+    this.trickIdx = 0;
+    this.trickStep = 0;
+  }
+  // ── QWOP ──────────────────────────────────────────────────────────
+  _stepQwop() {
+    const k = this.qwopKeys;
+    const d = this.qwopDelta;
+    const targets = { ...this.homeQpos };
+    if (k["KeyQ"]) targets.left_hip_pitch = this.homeQpos.left_hip_pitch - d;
+    if (k["KeyW"]) targets.right_hip_pitch = this.homeQpos.right_hip_pitch - d;
+    if (k["KeyA"]) targets.left_knee = this.homeQpos.left_knee + d;
+    if (k["KeyS"]) targets.right_knee = this.homeQpos.right_knee + d;
+    if (k["KeyI"]) targets.left_ankle = this.homeQpos.left_ankle + d * 0.5;
+    if (k["KeyO"]) targets.right_ankle = this.homeQpos.right_ankle + d * 0.5;
+    if (k["KeyK"]) targets.left_shoulder_pitch = this.homeQpos.left_shoulder_pitch - d * 1.5;
+    if (k["KeyL"]) targets.right_shoulder_pitch = this.homeQpos.right_shoulder_pitch - d * 1.5;
+    if (k["KeyZ"]) targets.torso = this.homeQpos.torso + d * 0.5;
+    if (k["KeyX"]) targets.torso = this.homeQpos.torso - d * 0.5;
+    const ctrl = this.data.ctrl;
+    for (const [name, actI] of Object.entries(this.actIdx)) {
+      const [kp, kd] = this._gainsForJoint(name);
+      ctrl[actI] = this.pdTorque(name, targets[name], kp, kd);
+    }
+    this._clampCtrl();
+  }
+  _clampCtrl() {
+    if (this.model.actuator_ctrlrange) {
+      const ctrl = this.data.ctrl;
+      for (let i = 0; i < this.model.nu; i++) {
+        const lo = this.model.actuator_ctrlrange[i * 2];
+        const hi = this.model.actuator_ctrlrange[i * 2 + 1];
+        ctrl[i] = Math.max(lo, Math.min(hi, ctrl[i]));
+      }
+    }
+  }
+  // ── Walking ───────────────────────────────────────────────────────
+  _stepWalk() {
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
     const leftPhase = this.phase;
@@ -29546,18 +29788,25 @@ var H1CpgController = class {
       armKp,
       armKd
     );
-    if (this.model.actuator_ctrlrange) {
-      for (let i = 0; i < this.model.nu; i++) {
-        const lo = this.model.actuator_ctrlrange[i * 2];
-        const hi = this.model.actuator_ctrlrange[i * 2 + 1];
-        ctrl[i] = Math.max(lo, Math.min(hi, ctrl[i]));
-      }
+    this._clampCtrl();
+  }
+  // ── Main step ─────────────────────────────────────────────────────
+  step() {
+    if (!this.enabled) return;
+    if (this.qwopMode) {
+      this._stepQwop();
+    } else if (this.trickPhase !== IDLE2) {
+      this._stepTrick();
+    } else {
+      this._stepWalk();
     }
   }
   reset() {
     this.phase = 0;
     this.prevPitch = 0;
     this.prevRoll = 0;
+    this._endTrick();
+    this.qwopMode = false;
   }
 };
 
@@ -29704,6 +29953,131 @@ var B2CpgController = class {
 };
 
 // src/g1CpgController.js
+var IDLE3 = "idle";
+var CROUCH3 = "crouch";
+var LAUNCH3 = "launch";
+var AIR3 = "air";
+var LAND3 = "land";
+var RECOVER3 = "recover";
+var GAIN_SCALE3 = {
+  [IDLE3]: { kp: 1, kd: 1 },
+  [CROUCH3]: { kp: 1.3, kd: 1 },
+  [LAUNCH3]: { kp: 1.8, kd: 0.5 },
+  [AIR3]: { kp: 0.4, kd: 0.6 },
+  [LAND3]: { kp: 1, kd: 2 },
+  [RECOVER3]: { kp: 1, kd: 1 }
+};
+var TRICKS3 = {
+  jump: [
+    { phase: CROUCH3, steps: 80, targets: {
+      left_hip_pitch_joint: -0.7,
+      left_knee_joint: 1.4,
+      left_ankle_pitch_joint: -0.7,
+      right_hip_pitch_joint: -0.7,
+      right_knee_joint: 1.4,
+      right_ankle_pitch_joint: -0.7
+    } },
+    { phase: LAUNCH3, steps: 50, targets: {
+      left_hip_pitch_joint: 0.1,
+      left_knee_joint: 0.05,
+      left_ankle_pitch_joint: 0.05,
+      right_hip_pitch_joint: 0.1,
+      right_knee_joint: 0.05,
+      right_ankle_pitch_joint: 0.05
+    } },
+    { phase: AIR3, steps: 200, targets: {
+      left_hip_pitch_joint: -0.5,
+      left_knee_joint: 1,
+      left_ankle_pitch_joint: -0.5,
+      right_hip_pitch_joint: -0.5,
+      right_knee_joint: 1,
+      right_ankle_pitch_joint: -0.5
+    } },
+    { phase: LAND3, steps: 60, targets: {
+      left_hip_pitch_joint: -0.4,
+      left_knee_joint: 0.8,
+      left_ankle_pitch_joint: -0.4,
+      right_hip_pitch_joint: -0.4,
+      right_knee_joint: 0.8,
+      right_ankle_pitch_joint: -0.4
+    } },
+    { phase: RECOVER3, steps: 120, targets: {} }
+  ],
+  kick: [
+    { phase: CROUCH3, steps: 60, targets: {
+      left_hip_roll_joint: -0.1,
+      left_hip_pitch_joint: -0.3,
+      left_knee_joint: 0.6,
+      left_ankle_pitch_joint: -0.3,
+      right_hip_pitch_joint: -0.4,
+      right_knee_joint: 0.8
+    } },
+    { phase: LAUNCH3, steps: 40, targets: {
+      left_hip_roll_joint: -0.12,
+      right_hip_pitch_joint: -1.2,
+      right_knee_joint: 0.15,
+      right_ankle_pitch_joint: -0.05
+    } },
+    { phase: AIR3, steps: 100, gains: { kp: 1.2, kd: 1 }, targets: {
+      left_hip_roll_joint: -0.12,
+      right_hip_pitch_joint: -1.2,
+      right_knee_joint: 0.15,
+      right_ankle_pitch_joint: -0.05
+    } },
+    { phase: LAND3, steps: 60, targets: {
+      right_hip_pitch_joint: -0.3,
+      right_knee_joint: 0.6,
+      right_ankle_pitch_joint: -0.3
+    } },
+    { phase: RECOVER3, steps: 100, targets: {} }
+  ],
+  wave: [
+    { phase: CROUCH3, steps: 50, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch_joint: -1.5,
+      right_shoulder_roll_joint: -0.6,
+      right_elbow_joint: 1.2
+    } },
+    { phase: LAUNCH3, steps: 30, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch_joint: -1.5,
+      right_shoulder_roll_joint: -0.1,
+      right_elbow_joint: 0.8
+    } },
+    { phase: AIR3, steps: 30, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch_joint: -1.5,
+      right_shoulder_roll_joint: -0.6,
+      right_elbow_joint: 1.2
+    } },
+    { phase: LAND3, steps: 30, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch_joint: -1.5,
+      right_shoulder_roll_joint: -0.1,
+      right_elbow_joint: 0.8
+    } },
+    { phase: RECOVER3, steps: 80, gains: { kp: 1, kd: 1 }, targets: {} }
+  ],
+  bow: [
+    { phase: CROUCH3, steps: 80, gains: { kp: 1.2, kd: 1 }, targets: {
+      waist_pitch_joint: 0.4,
+      left_hip_pitch_joint: -0.5,
+      right_hip_pitch_joint: -0.5,
+      left_shoulder_pitch_joint: 0.4,
+      right_shoulder_pitch_joint: 0.4,
+      left_shoulder_roll_joint: 0.15,
+      right_shoulder_roll_joint: -0.15
+    } },
+    { phase: LAUNCH3, steps: 100, gains: { kp: 1.2, kd: 1 }, targets: {
+      waist_pitch_joint: 0.4,
+      left_hip_pitch_joint: -0.5,
+      right_hip_pitch_joint: -0.5,
+      left_shoulder_pitch_joint: 0.4,
+      right_shoulder_pitch_joint: 0.4,
+      left_shoulder_roll_joint: 0.15,
+      right_shoulder_roll_joint: -0.15
+    } },
+    { phase: AIR3, steps: 40, gains: { kp: 1, kd: 1 }, targets: {} },
+    { phase: LAND3, steps: 40, gains: { kp: 1, kd: 1 }, targets: {} },
+    { phase: RECOVER3, steps: 80, targets: {} }
+  ]
+};
 var G1CpgController = class {
   constructor(mujoco2, model2, data2) {
     this.mujoco = mujoco2;
@@ -29792,6 +30166,14 @@ var G1CpgController = class {
     this.turnRate = 0;
     this.prevPitch = 0;
     this.prevRoll = 0;
+    this.trickPhase = IDLE3;
+    this.trickName = null;
+    this.trickIdx = 0;
+    this.trickStep = 0;
+    this.trickStart = {};
+    this.qwopMode = false;
+    this.qwopKeys = {};
+    this.qwopDelta = 0.4;
   }
   findJointIndices() {
     for (const name of Object.keys(this.actIdx)) {
@@ -29837,8 +30219,119 @@ var G1CpgController = class {
     const qdot = this.data.qvel[dofIdx] || 0;
     return kp * (target - q) - kd * qdot;
   }
-  step() {
-    if (!this.enabled) return;
+  _gainsForJoint(name) {
+    if (name.includes("knee")) return [250, 15];
+    if (name.includes("ankle_pitch")) return [70, 5];
+    if (name.includes("ankle_roll")) return [70, 5];
+    if (name.includes("hip")) return [150, 10];
+    if (name.includes("waist")) return [150, 8];
+    if (name.includes("wrist")) return [6, 0.5];
+    return [20, 1.5];
+  }
+  // ── Tricks ─────────────────────────────────────────────────────────
+  triggerTrick(name) {
+    if (this.trickPhase !== IDLE3 || !TRICKS3[name]) return;
+    this.trickName = name;
+    this.trickIdx = 0;
+    this.trickStep = 0;
+    this.trickPhase = TRICKS3[name][0].phase;
+    this._snapshotCurrentPose();
+    console.log(`G1 trick: ${name}`);
+  }
+  _snapshotCurrentPose() {
+    this.trickStart = {};
+    for (const name of Object.keys(this.actIdx)) {
+      const idx = this.jntIdx[name];
+      this.trickStart[name] = idx !== void 0 ? this.data.qpos[idx] : this.homeQpos[name] || 0;
+    }
+  }
+  _stepTrick() {
+    const seq = TRICKS3[this.trickName];
+    if (!seq) {
+      this.trickPhase = IDLE3;
+      return;
+    }
+    const spec = seq[this.trickIdx];
+    if (!spec) {
+      this._endTrick();
+      return;
+    }
+    this.trickStep++;
+    this.trickPhase = spec.phase;
+    const p = Math.min(1, this.trickStep / spec.steps);
+    const t = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+    const gs = spec.gains || GAIN_SCALE3[spec.phase];
+    const fullTarget = { ...this.homeQpos, ...spec.targets };
+    const ctrl = this.data.ctrl;
+    for (const [name, actI] of Object.entries(this.actIdx)) {
+      const start = this.trickStart[name] ?? this.homeQpos[name] ?? 0;
+      const end = fullTarget[name] ?? this.homeQpos[name] ?? 0;
+      const target = start + (end - start) * t;
+      const [kp, kd] = this._gainsForJoint(name);
+      ctrl[actI] = this.pdTorque(name, target, kp * gs.kp, kd * gs.kd);
+    }
+    if (spec.phase === AIR3 && this.trickStep > 40 && (this.trickName === "jump" || this.trickName === "kick")) {
+      const z = this.data.qpos[2];
+      const vz = this.data.qvel[2];
+      if (z < 0.7 && vz < -0.1) {
+        this._advanceTrick();
+        return;
+      }
+    }
+    if (this.trickStep >= spec.steps) this._advanceTrick();
+    this._clampCtrl();
+  }
+  _advanceTrick() {
+    this.trickIdx++;
+    this.trickStep = 0;
+    this._snapshotCurrentPose();
+    const seq = TRICKS3[this.trickName];
+    if (!seq || this.trickIdx >= seq.length) {
+      this._endTrick();
+    } else {
+      this.trickPhase = seq[this.trickIdx].phase;
+    }
+  }
+  _endTrick() {
+    this.trickPhase = IDLE3;
+    this.trickName = null;
+    this.trickIdx = 0;
+    this.trickStep = 0;
+  }
+  // ── QWOP ──────────────────────────────────────────────────────────
+  _stepQwop() {
+    const k = this.qwopKeys;
+    const d = this.qwopDelta;
+    const targets = { ...this.homeQpos };
+    if (k["KeyQ"]) targets.left_hip_pitch_joint = this.homeQpos.left_hip_pitch_joint - d;
+    if (k["KeyW"]) targets.right_hip_pitch_joint = this.homeQpos.right_hip_pitch_joint - d;
+    if (k["KeyA"]) targets.left_knee_joint = this.homeQpos.left_knee_joint + d;
+    if (k["KeyS"]) targets.right_knee_joint = this.homeQpos.right_knee_joint + d;
+    if (k["KeyI"]) targets.left_ankle_pitch_joint = this.homeQpos.left_ankle_pitch_joint + d * 0.4;
+    if (k["KeyO"]) targets.right_ankle_pitch_joint = this.homeQpos.right_ankle_pitch_joint + d * 0.4;
+    if (k["KeyK"]) targets.left_shoulder_pitch_joint = this.homeQpos.left_shoulder_pitch_joint - d * 1.5;
+    if (k["KeyL"]) targets.right_shoulder_pitch_joint = this.homeQpos.right_shoulder_pitch_joint - d * 1.5;
+    if (k["KeyZ"]) targets.waist_yaw_joint = this.homeQpos.waist_yaw_joint + d * 0.5;
+    if (k["KeyX"]) targets.waist_yaw_joint = this.homeQpos.waist_yaw_joint - d * 0.5;
+    const ctrl = this.data.ctrl;
+    for (const [name, actI] of Object.entries(this.actIdx)) {
+      const [kp, kd] = this._gainsForJoint(name);
+      ctrl[actI] = this.pdTorque(name, targets[name], kp, kd);
+    }
+    this._clampCtrl();
+  }
+  _clampCtrl() {
+    if (this.model.actuator_ctrlrange) {
+      const ctrl = this.data.ctrl;
+      for (let i = 0; i < this.model.nu; i++) {
+        const lo = this.model.actuator_ctrlrange[i * 2];
+        const hi = this.model.actuator_ctrlrange[i * 2 + 1];
+        ctrl[i] = Math.max(lo, Math.min(hi, ctrl[i]));
+      }
+    }
+  }
+  // ── Walking ───────────────────────────────────────────────────────
+  _stepWalk() {
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
     const leftPhase = this.phase;
@@ -29962,22 +30455,154 @@ var G1CpgController = class {
         ctrl[this.actIdx[j]] = this.pdTorque(j, this.homeQpos[j], armKp * 0.3, armKd * 0.5);
       }
     }
-    if (this.model.actuator_ctrlrange) {
-      for (let i = 0; i < this.model.nu; i++) {
-        const lo = this.model.actuator_ctrlrange[i * 2];
-        const hi = this.model.actuator_ctrlrange[i * 2 + 1];
-        ctrl[i] = Math.max(lo, Math.min(hi, ctrl[i]));
-      }
+    this._clampCtrl();
+  }
+  // ── Main step ─────────────────────────────────────────────────────
+  step() {
+    if (!this.enabled) return;
+    if (this.qwopMode) {
+      this._stepQwop();
+    } else if (this.trickPhase !== IDLE3) {
+      this._stepTrick();
+    } else {
+      this._stepWalk();
     }
   }
   reset() {
     this.phase = 0;
     this.prevPitch = 0;
     this.prevRoll = 0;
+    this._endTrick();
+    this.qwopMode = false;
   }
 };
 
 // src/h1_2CpgController.js
+var IDLE4 = "idle";
+var CROUCH4 = "crouch";
+var LAUNCH4 = "launch";
+var AIR4 = "air";
+var LAND4 = "land";
+var RECOVER4 = "recover";
+var GAIN_SCALE4 = {
+  [IDLE4]: { kp: 1, kd: 1 },
+  [CROUCH4]: { kp: 1.3, kd: 1 },
+  [LAUNCH4]: { kp: 1.8, kd: 0.5 },
+  [AIR4]: { kp: 0.4, kd: 0.6 },
+  [LAND4]: { kp: 1, kd: 2 },
+  [RECOVER4]: { kp: 1, kd: 1 }
+};
+var TRICKS4 = {
+  jump: [
+    { phase: CROUCH4, steps: 80, targets: {
+      left_hip_pitch_joint: -1,
+      left_knee_joint: 2,
+      left_ankle_pitch_joint: -1,
+      right_hip_pitch_joint: -1,
+      right_knee_joint: 2,
+      right_ankle_pitch_joint: -1
+    } },
+    { phase: LAUNCH4, steps: 50, targets: {
+      left_hip_pitch_joint: 0.15,
+      left_knee_joint: 0.05,
+      left_ankle_pitch_joint: 0.05,
+      right_hip_pitch_joint: 0.15,
+      right_knee_joint: 0.05,
+      right_ankle_pitch_joint: 0.05
+    } },
+    { phase: AIR4, steps: 200, targets: {
+      left_hip_pitch_joint: -0.8,
+      left_knee_joint: 1.6,
+      left_ankle_pitch_joint: -0.8,
+      right_hip_pitch_joint: -0.8,
+      right_knee_joint: 1.6,
+      right_ankle_pitch_joint: -0.8
+    } },
+    { phase: LAND4, steps: 60, targets: {
+      left_hip_pitch_joint: -0.7,
+      left_knee_joint: 1.4,
+      left_ankle_pitch_joint: -0.7,
+      right_hip_pitch_joint: -0.7,
+      right_knee_joint: 1.4,
+      right_ankle_pitch_joint: -0.7
+    } },
+    { phase: RECOVER4, steps: 120, targets: {} }
+  ],
+  kick: [
+    { phase: CROUCH4, steps: 60, targets: {
+      left_hip_roll_joint: -0.12,
+      left_hip_pitch_joint: -0.5,
+      left_knee_joint: 1,
+      left_ankle_pitch_joint: -0.5,
+      right_hip_pitch_joint: -0.6,
+      right_knee_joint: 1.2
+    } },
+    { phase: LAUNCH4, steps: 40, targets: {
+      left_hip_roll_joint: -0.15,
+      right_hip_pitch_joint: -1.5,
+      right_knee_joint: 0.2,
+      right_ankle_pitch_joint: -0.1
+    } },
+    { phase: AIR4, steps: 100, gains: { kp: 1.2, kd: 1 }, targets: {
+      left_hip_roll_joint: -0.15,
+      right_hip_pitch_joint: -1.5,
+      right_knee_joint: 0.2,
+      right_ankle_pitch_joint: -0.1
+    } },
+    { phase: LAND4, steps: 60, targets: {
+      right_hip_pitch_joint: -0.5,
+      right_knee_joint: 1,
+      right_ankle_pitch_joint: -0.5
+    } },
+    { phase: RECOVER4, steps: 100, targets: {} }
+  ],
+  wave: [
+    { phase: CROUCH4, steps: 50, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch_joint: -1.5,
+      right_shoulder_roll_joint: -0.6,
+      right_elbow_joint: -1
+    } },
+    { phase: LAUNCH4, steps: 30, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch_joint: -1.5,
+      right_shoulder_roll_joint: -0.1,
+      right_elbow_joint: -0.8
+    } },
+    { phase: AIR4, steps: 30, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch_joint: -1.5,
+      right_shoulder_roll_joint: -0.6,
+      right_elbow_joint: -1
+    } },
+    { phase: LAND4, steps: 30, gains: { kp: 1, kd: 1 }, targets: {
+      right_shoulder_pitch_joint: -1.5,
+      right_shoulder_roll_joint: -0.1,
+      right_elbow_joint: -0.8
+    } },
+    { phase: RECOVER4, steps: 80, gains: { kp: 1, kd: 1 }, targets: {} }
+  ],
+  bow: [
+    { phase: CROUCH4, steps: 80, gains: { kp: 1.2, kd: 1 }, targets: {
+      torso_joint: 0.3,
+      left_hip_pitch_joint: -0.8,
+      right_hip_pitch_joint: -0.8,
+      left_shoulder_pitch_joint: 0.5,
+      right_shoulder_pitch_joint: 0.5,
+      left_shoulder_roll_joint: 0.05,
+      right_shoulder_roll_joint: -0.05
+    } },
+    { phase: LAUNCH4, steps: 100, gains: { kp: 1.2, kd: 1 }, targets: {
+      torso_joint: 0.3,
+      left_hip_pitch_joint: -0.8,
+      right_hip_pitch_joint: -0.8,
+      left_shoulder_pitch_joint: 0.5,
+      right_shoulder_pitch_joint: 0.5,
+      left_shoulder_roll_joint: 0.05,
+      right_shoulder_roll_joint: -0.05
+    } },
+    { phase: AIR4, steps: 40, gains: { kp: 1, kd: 1 }, targets: {} },
+    { phase: LAND4, steps: 40, gains: { kp: 1, kd: 1 }, targets: {} },
+    { phase: RECOVER4, steps: 80, targets: {} }
+  ]
+};
 var H1_2CpgController = class {
   constructor(mujoco2, model2, data2) {
     this.mujoco = mujoco2;
@@ -30060,6 +30685,14 @@ var H1_2CpgController = class {
     this.turnRate = 0;
     this.prevPitch = 0;
     this.prevRoll = 0;
+    this.trickPhase = IDLE4;
+    this.trickName = null;
+    this.trickIdx = 0;
+    this.trickStep = 0;
+    this.trickStart = {};
+    this.qwopMode = false;
+    this.qwopKeys = {};
+    this.qwopDelta = 0.5;
   }
   findJointIndices() {
     for (const name of Object.keys(this.actIdx)) {
@@ -30099,8 +30732,119 @@ var H1_2CpgController = class {
     const qdot = this.data.qvel[dofIdx] || 0;
     return kp * (target - q) - kd * qdot;
   }
-  step() {
-    if (!this.enabled) return;
+  _gainsForJoint(name) {
+    if (name.includes("knee")) return [500, 20];
+    if (name.includes("ankle_pitch")) return [80, 5];
+    if (name.includes("ankle_roll")) return [50, 3];
+    if (name.includes("hip")) return [350, 15];
+    if (name.includes("torso")) return [300, 12];
+    if (name.includes("wrist")) return [12, 1];
+    return [40, 2];
+  }
+  // ── Tricks ─────────────────────────────────────────────────────────
+  triggerTrick(name) {
+    if (this.trickPhase !== IDLE4 || !TRICKS4[name]) return;
+    this.trickName = name;
+    this.trickIdx = 0;
+    this.trickStep = 0;
+    this.trickPhase = TRICKS4[name][0].phase;
+    this._snapshotCurrentPose();
+    console.log(`H1-2 trick: ${name}`);
+  }
+  _snapshotCurrentPose() {
+    this.trickStart = {};
+    for (const name of Object.keys(this.actIdx)) {
+      const idx = this.jntIdx[name];
+      this.trickStart[name] = idx !== void 0 ? this.data.qpos[idx] : this.homeQpos[name] || 0;
+    }
+  }
+  _stepTrick() {
+    const seq = TRICKS4[this.trickName];
+    if (!seq) {
+      this.trickPhase = IDLE4;
+      return;
+    }
+    const spec = seq[this.trickIdx];
+    if (!spec) {
+      this._endTrick();
+      return;
+    }
+    this.trickStep++;
+    this.trickPhase = spec.phase;
+    const p = Math.min(1, this.trickStep / spec.steps);
+    const t = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+    const gs = spec.gains || GAIN_SCALE4[spec.phase];
+    const fullTarget = { ...this.homeQpos, ...spec.targets };
+    const ctrl = this.data.ctrl;
+    for (const [name, actI] of Object.entries(this.actIdx)) {
+      const start = this.trickStart[name] ?? this.homeQpos[name] ?? 0;
+      const end = fullTarget[name] ?? this.homeQpos[name] ?? 0;
+      const target = start + (end - start) * t;
+      const [kp, kd] = this._gainsForJoint(name);
+      ctrl[actI] = this.pdTorque(name, target, kp * gs.kp, kd * gs.kd);
+    }
+    if (spec.phase === AIR4 && this.trickStep > 40 && (this.trickName === "jump" || this.trickName === "kick")) {
+      const z = this.data.qpos[2];
+      const vz = this.data.qvel[2];
+      if (z < 1 && vz < -0.1) {
+        this._advanceTrick();
+        return;
+      }
+    }
+    if (this.trickStep >= spec.steps) this._advanceTrick();
+    this._clampCtrl();
+  }
+  _advanceTrick() {
+    this.trickIdx++;
+    this.trickStep = 0;
+    this._snapshotCurrentPose();
+    const seq = TRICKS4[this.trickName];
+    if (!seq || this.trickIdx >= seq.length) {
+      this._endTrick();
+    } else {
+      this.trickPhase = seq[this.trickIdx].phase;
+    }
+  }
+  _endTrick() {
+    this.trickPhase = IDLE4;
+    this.trickName = null;
+    this.trickIdx = 0;
+    this.trickStep = 0;
+  }
+  // ── QWOP ──────────────────────────────────────────────────────────
+  _stepQwop() {
+    const k = this.qwopKeys;
+    const d = this.qwopDelta;
+    const targets = { ...this.homeQpos };
+    if (k["KeyQ"]) targets.left_hip_pitch_joint = this.homeQpos.left_hip_pitch_joint - d;
+    if (k["KeyW"]) targets.right_hip_pitch_joint = this.homeQpos.right_hip_pitch_joint - d;
+    if (k["KeyA"]) targets.left_knee_joint = this.homeQpos.left_knee_joint + d;
+    if (k["KeyS"]) targets.right_knee_joint = this.homeQpos.right_knee_joint + d;
+    if (k["KeyI"]) targets.left_ankle_pitch_joint = this.homeQpos.left_ankle_pitch_joint + d * 0.5;
+    if (k["KeyO"]) targets.right_ankle_pitch_joint = this.homeQpos.right_ankle_pitch_joint + d * 0.5;
+    if (k["KeyK"]) targets.left_shoulder_pitch_joint = this.homeQpos.left_shoulder_pitch_joint - d * 1.5;
+    if (k["KeyL"]) targets.right_shoulder_pitch_joint = this.homeQpos.right_shoulder_pitch_joint - d * 1.5;
+    if (k["KeyZ"]) targets.torso_joint = this.homeQpos.torso_joint + d * 0.5;
+    if (k["KeyX"]) targets.torso_joint = this.homeQpos.torso_joint - d * 0.5;
+    const ctrl = this.data.ctrl;
+    for (const [name, actI] of Object.entries(this.actIdx)) {
+      const [kp, kd] = this._gainsForJoint(name);
+      ctrl[actI] = this.pdTorque(name, targets[name], kp, kd);
+    }
+    this._clampCtrl();
+  }
+  _clampCtrl() {
+    if (this.model.actuator_ctrlrange) {
+      const ctrl = this.data.ctrl;
+      for (let i = 0; i < this.model.nu; i++) {
+        const lo = this.model.actuator_ctrlrange[i * 2];
+        const hi = this.model.actuator_ctrlrange[i * 2 + 1];
+        ctrl[i] = Math.max(lo, Math.min(hi, ctrl[i]));
+      }
+    }
+  }
+  // ── Walking ───────────────────────────────────────────────────────
+  _stepWalk() {
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
     const leftPhase = this.phase;
@@ -30226,18 +30970,25 @@ var H1_2CpgController = class {
         ctrl[this.actIdx[j]] = this.pdTorque(j, this.homeQpos[j], wKp, wKd);
       }
     }
-    if (this.model.actuator_ctrlrange) {
-      for (let i = 0; i < this.model.nu; i++) {
-        const lo = this.model.actuator_ctrlrange[i * 2];
-        const hi = this.model.actuator_ctrlrange[i * 2 + 1];
-        ctrl[i] = Math.max(lo, Math.min(hi, ctrl[i]));
-      }
+    this._clampCtrl();
+  }
+  // ── Main step ─────────────────────────────────────────────────────
+  step() {
+    if (!this.enabled) return;
+    if (this.qwopMode) {
+      this._stepQwop();
+    } else if (this.trickPhase !== IDLE4) {
+      this._stepTrick();
+    } else {
+      this._stepWalk();
     }
   }
   reset() {
     this.phase = 0;
     this.prevPitch = 0;
     this.prevRoll = 0;
+    this._endTrick();
+    this.qwopMode = false;
   }
 };
 
@@ -31701,10 +32452,10 @@ function updateControllerBtn() {
   const labels = {
     go2: () => go2Controller?.qwopMode ? "QWOP" : go2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
     go2rl: () => go2RlController?.enabled ? "RL: ON" : "RL: OFF",
-    h1: () => h1Controller?.enabled ? "CPG: ON" : "CPG: OFF",
+    h1: () => h1Controller?.qwopMode ? "QWOP" : h1Controller?.enabled ? "CPG: ON" : "CPG: OFF",
     b2: () => b2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
-    g1: () => g1Controller?.enabled ? "CPG: ON" : "CPG: OFF",
-    h1_2: () => h1_2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
+    g1: () => g1Controller?.qwopMode ? "QWOP" : g1Controller?.enabled ? "CPG: ON" : "CPG: OFF",
+    h1_2: () => h1_2Controller?.qwopMode ? "QWOP" : h1_2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
     factory: () => factoryController?.enabled ? `CPG: ON (${factoryController.numRobots}x)` : "CPG: OFF",
     evolve: () => evolveRunner?.enabled ? `EVO: ${evolveRunner.getStatusText()}` : "EVO: OFF"
   };
@@ -31890,7 +32641,9 @@ window.addEventListener("keydown", (e) => {
     if (c && "qwopMode" in c) {
       c.qwopMode = !c.qwopMode;
       if (c.qwopMode) c._endTrick?.();
-      setStatus(c.qwopMode ? "QWOP Mode! Q/W=front thighs A/S=front calves I/O=rear thighs K/L=rear calves" : "CPG Mode");
+      const isQuad = activeController === "go2";
+      const hint = isQuad ? "QWOP Mode! Q/W=front thighs A/S=front calves I/O=rear thighs K/L=rear calves" : "QWOP Mode! Q/W=L/R hip A/S=L/R knee I/O=ankle K/L=arms Z/X=torso";
+      setStatus(c.qwopMode ? hint : "CPG Mode");
       updateControllerBtn();
     }
   }
