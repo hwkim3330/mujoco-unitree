@@ -28481,7 +28481,7 @@ var Go2CpgController = class {
       const isSwing = swing > 0;
       const isFront = name.startsWith("F");
       const turnSign = isFront ? 1 : -1;
-      const thighTarget = this.homeThigh + direction * this.thighAmp * ampScale * swing + this.turnRate * 0.06 * turnSign * leg.side;
+      const thighTarget = this.homeThigh - direction * this.thighAmp * ampScale * swing + this.turnRate * 0.06 * turnSign * leg.side;
       const calfTarget = this.homeCalf - this.calfAmp * ampScale * (isSwing ? Math.sin(legPhase) : 0);
       const hipTarget = this.homeHip + leg.side * this.hipAmp * (isSwing ? 1 : -1) * ampScale + this.lateralSpeed * 0.08 * leg.side;
       const hipJoint = `${leg.prefix}_hip_joint`;
@@ -28944,11 +28944,11 @@ async function loadScene(scenePath) {
     activeController = "go2";
   } else if (cfg.controller === "h1") {
     h1Controller = new H1CpgController(mujoco, model, data);
+    h1Controller.enabled = true;
     for (let i = 0; i < 200; i++) {
       h1Controller.step();
       mujoco.mj_step(model, data);
     }
-    h1Controller.enabled = true;
     activeController = "h1";
   }
   findObstacleIndices();
@@ -28996,11 +28996,11 @@ function resetScene() {
   }
   if (h1Controller) {
     h1Controller.reset();
+    h1Controller.enabled = true;
     for (let i = 0; i < 200; i++) {
       h1Controller.step();
       mujoco.mj_step(model, data);
     }
-    h1Controller.enabled = true;
   }
   updateControllerBtn();
 }

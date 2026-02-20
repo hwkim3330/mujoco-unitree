@@ -147,8 +147,9 @@ export class Go2CpgController {
       const turnSign = isFront ? 1 : -1;
 
       // Thigh (hip flexion): swing forward/back
+      // Negative = leg forward, positive = leg backward (for Go2 Y-axis joints)
       const thighTarget = this.homeThigh
-        + direction * this.thighAmp * ampScale * swing
+        - direction * this.thighAmp * ampScale * swing
         + this.turnRate * 0.06 * turnSign * leg.side;
 
       // Calf (knee): bend more during swing, extend during stance
