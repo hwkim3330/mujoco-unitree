@@ -1,6 +1,7 @@
 /**
  * main.js — MuJoCo WASM + Three.js Unitree robot playground.
- * Supports: Go2 (quadruped CPG), H1 (humanoid CPG).
+ * Supports: Go2, B2 (quadruped CPG), H1, H1-2, G1 (humanoid CPG),
+ *           Go2 RL, Go2 Factory (9x), Evolution mode.
  */
 
 import * as THREE from 'three';
@@ -11,8 +12,12 @@ import { loadSceneAssets } from './assetLoader.js';
 import { Go2CpgController } from './go2CpgController.js';
 import { Go2OnnxController } from './go2OnnxController.js';
 import { H1CpgController } from './h1CpgController.js';
+import { B2CpgController } from './b2CpgController.js';
+import { G1CpgController } from './g1CpgController.js';
+import { H1_2CpgController } from './h1_2CpgController.js';
 import { FactoryController } from './factoryController.js';
 import { generateFactoryXML } from './factoryScene.js';
+import { EvolutionController } from './evolutionController.js';
 
 // ─── DOM ────────────────────────────────────────────────────────────
 const statusEl = document.getElementById('status');
@@ -21,6 +26,8 @@ const resetBtn = document.getElementById('btn-reset');
 const controllerBtn = document.getElementById('btn-controller');
 const speedBtn = document.getElementById('btn-speed');
 const helpOverlay = document.getElementById('help-overlay');
+const evolvePanel = document.getElementById('evolve-panel');
+const evolveStatus = document.getElementById('evolve-status');
 
 // ─── Three.js Setup ─────────────────────────────────────────────────
 const app = document.getElementById('app');
@@ -51,11 +58,15 @@ let data;
 let bodies = {};
 let mujocoRoot = null;
 
-let activeController = null; // 'go2' | 'go2rl' | 'h1' | 'factory' | null
+let activeController = null; // 'go2' | 'go2rl' | 'h1' | 'b2' | 'g1' | 'h1_2' | 'factory' | null
 let go2Controller = null;
 let go2RlController = null;
 let h1Controller = null;
+let b2Controller = null;
+let g1Controller = null;
+let h1_2Controller = null;
 let factoryController = null;
+let evolutionController = null;
 
 let paused = false;
 let cameraFollow = true;
@@ -95,7 +106,7 @@ const SCENES = {
   },
   'unitree_go2/scene.xml|rl': {
     controller: 'go2rl',
-    scenePath: 'unitree_go2/scene.xml', // actual XML to load
+    scenePath: 'unitree_go2/scene.xml',
     onnxModel: './assets/models/go2_flat_policy.onnx',
     camera: { pos: [1.5, 1.0, 1.5], target: [0, 0.25, 0] },
   },
@@ -107,6 +118,10 @@ const SCENES = {
     controller: 'go2',
     camera: { pos: [1.5, 1.0, 1.5], target: [0.5, 0.1, 0] },
   },
+  'unitree_b2/scene.xml': {
+    controller: 'b2',
+    camera: { pos: [2.5, 1.5, 2.5], target: [0, 0.35, 0] },
+  },
   'unitree_h1/scene.xml': {
     controller: 'h1',
     camera: { pos: [3.0, 2.0, 3.0], target: [0, 0.9, 0] },
@@ -114,6 +129,14 @@ const SCENES = {
   'unitree_h1/scene_stairs.xml': {
     controller: 'h1',
     camera: { pos: [4.0, 2.5, 3.5], target: [2.0, 0.5, 0] },
+  },
+  'unitree_g1/scene.xml': {
+    controller: 'g1',
+    camera: { pos: [2.5, 1.8, 2.5], target: [0, 0.7, 0] },
+  },
+  'unitree_h1_2/scene.xml': {
+    controller: 'h1_2',
+    camera: { pos: [3.0, 2.0, 3.0], target: [0, 0.9, 0] },
   },
   'unitree_go2/scene_factory': {
     controller: 'factory',
@@ -224,6 +247,12 @@ function clearScene() {
   bodies = {};
 }
 
+function getObstacleScale(sceneKey) {
+  if (sceneKey.includes('h1') || sceneKey.includes('g1')) return 3.5;
+  if (sceneKey.includes('b2')) return 4.0;
+  return 2.5;
+}
+
 async function loadScene(sceneKey) {
   setStatus(`Loading: ${sceneKey}`);
 
@@ -241,7 +270,7 @@ async function loadScene(sceneKey) {
     // Normal mode: load assets and add arena obstacles
     const scenePath = cfg.scenePath || sceneKey;
     await loadSceneAssets(mujoco, scenePath, setStatus);
-    currentObstacleScale = scenePath.includes('h1') ? 3.5 : 2.5;
+    currentObstacleScale = getObstacleScale(sceneKey);
     const originalXml = new TextDecoder().decode(mujoco.FS.readFile('/working/' + scenePath));
     const arenaXml = generateArenaXML(originalXml, currentObstacleScale);
     const arenaPath = scenePath.replace('.xml', '_arena.xml');
@@ -277,29 +306,30 @@ async function loadScene(sceneKey) {
   go2Controller = null;
   go2RlController = null;
   h1Controller = null;
+  b2Controller = null;
+  g1Controller = null;
+  h1_2Controller = null;
   factoryController = null;
+  evolutionController = null;
   stepCounter = 0;
 
   model.opt.iterations = 30;
 
   if (cfg.controller === 'go2') {
     go2Controller = new Go2CpgController(mujoco, model, data);
+    go2Controller.enabled = true;
     for (let i = 0; i < 200; i++) {
-      go2Controller.enabled = true;
       go2Controller.step();
       mujoco.mj_step(model, data);
     }
-    go2Controller.enabled = true;
     activeController = 'go2';
   } else if (cfg.controller === 'go2rl') {
     go2RlController = new Go2OnnxController(mujoco, model, data);
     setStatus('Loading RL policy...');
     const loaded = await go2RlController.loadModel(cfg.onnxModel);
     if (loaded) {
-      // Set initial pose to IsaacLab defaults (thigh=1.1 instead of keyframe 0.9)
       go2RlController.setInitialPose();
       go2RlController.enabled = true;
-      // Warm-up: PD hold at default pose to settle contacts
       for (let i = 0; i < 500; i++) {
         go2RlController.applyPD();
         mujoco.mj_step(model, data);
@@ -315,6 +345,14 @@ async function loadScene(sceneKey) {
       }
       activeController = 'go2';
     }
+  } else if (cfg.controller === 'b2') {
+    b2Controller = new B2CpgController(mujoco, model, data);
+    b2Controller.enabled = true;
+    for (let i = 0; i < 200; i++) {
+      b2Controller.step();
+      mujoco.mj_step(model, data);
+    }
+    activeController = 'b2';
   } else if (cfg.controller === 'h1') {
     h1Controller = new H1CpgController(mujoco, model, data);
     h1Controller.enabled = true;
@@ -323,6 +361,32 @@ async function loadScene(sceneKey) {
       mujoco.mj_step(model, data);
     }
     activeController = 'h1';
+  } else if (cfg.controller === 'g1') {
+    g1Controller = new G1CpgController(mujoco, model, data);
+    // G1 has no keyframe — set standing pose
+    g1Controller.setStandingPose();
+    mujoco.mj_forward(model, data);
+    g1Controller.enabled = true;
+    for (let i = 0; i < 500; i++) {
+      g1Controller.step();
+      mujoco.mj_step(model, data);
+    }
+    activeController = 'g1';
+  } else if (cfg.controller === 'h1_2') {
+    h1_2Controller = new H1_2CpgController(mujoco, model, data);
+    // H1-2 has no keyframe — set standing pose via PD warm-up
+    // Write home pose into qpos
+    for (const [name, target] of Object.entries(h1_2Controller.homeQpos)) {
+      const idx = h1_2Controller.jntIdx[name];
+      if (idx !== undefined) data.qpos[idx] = target;
+    }
+    mujoco.mj_forward(model, data);
+    h1_2Controller.enabled = true;
+    for (let i = 0; i < 500; i++) {
+      h1_2Controller.step();
+      mujoco.mj_step(model, data);
+    }
+    activeController = 'h1_2';
   } else if (cfg.controller === 'factory') {
     factoryController = new FactoryController(mujoco, model, data, cfg.numRobots);
     factoryController.enabled = true;
@@ -338,6 +402,9 @@ async function loadScene(sceneKey) {
   nextBox = 0;
   updateControllerBtn();
 
+  // Hide evolution panel for non-evolution modes
+  if (evolvePanel) evolvePanel.style.display = 'none';
+
   if (cfg.camera) {
     camera.position.set(...cfg.camera.pos);
     controls.target.set(...cfg.camera.target);
@@ -351,17 +418,18 @@ async function loadScene(sceneKey) {
 
 function updateControllerBtn() {
   if (!controllerBtn) return;
-  if (activeController === 'go2') {
-    controllerBtn.textContent = go2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF';
-    controllerBtn.style.display = '';
-  } else if (activeController === 'go2rl') {
-    controllerBtn.textContent = go2RlController?.enabled ? 'RL: ON' : 'RL: OFF';
-    controllerBtn.style.display = '';
-  } else if (activeController === 'h1') {
-    controllerBtn.textContent = h1Controller?.enabled ? 'CPG: ON' : 'CPG: OFF';
-    controllerBtn.style.display = '';
-  } else if (activeController === 'factory') {
-    controllerBtn.textContent = factoryController?.enabled ? `CPG: ON (${factoryController.numRobots}x)` : 'CPG: OFF';
+  const labels = {
+    go2: () => go2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
+    go2rl: () => go2RlController?.enabled ? 'RL: ON' : 'RL: OFF',
+    h1: () => h1Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
+    b2: () => b2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
+    g1: () => g1Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
+    h1_2: () => h1_2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
+    factory: () => factoryController?.enabled ? `CPG: ON (${factoryController.numRobots}x)` : 'CPG: OFF',
+  };
+  const fn = labels[activeController];
+  if (fn) {
+    controllerBtn.textContent = fn();
     controllerBtn.style.display = '';
   } else {
     controllerBtn.style.display = 'none';
@@ -398,11 +466,42 @@ function resetScene() {
       mujoco.mj_step(model, data);
     }
   }
+  if (b2Controller) {
+    b2Controller.reset();
+    b2Controller.enabled = true;
+    for (let i = 0; i < 200; i++) {
+      b2Controller.step();
+      mujoco.mj_step(model, data);
+    }
+  }
   if (h1Controller) {
     h1Controller.reset();
     h1Controller.enabled = true;
     for (let i = 0; i < 500; i++) {
       h1Controller.step();
+      mujoco.mj_step(model, data);
+    }
+  }
+  if (g1Controller) {
+    g1Controller.setStandingPose();
+    mujoco.mj_forward(model, data);
+    g1Controller.reset();
+    g1Controller.enabled = true;
+    for (let i = 0; i < 500; i++) {
+      g1Controller.step();
+      mujoco.mj_step(model, data);
+    }
+  }
+  if (h1_2Controller) {
+    for (const [name, target] of Object.entries(h1_2Controller.homeQpos)) {
+      const idx = h1_2Controller.jntIdx[name];
+      if (idx !== undefined) data.qpos[idx] = target;
+    }
+    mujoco.mj_forward(model, data);
+    h1_2Controller.reset();
+    h1_2Controller.enabled = true;
+    for (let i = 0; i < 500; i++) {
+      h1_2Controller.step();
       mujoco.mj_step(model, data);
     }
   }
@@ -424,6 +523,12 @@ function toggleController() {
     go2RlController.enabled = !go2RlController.enabled;
   } else if (activeController === 'h1' && h1Controller) {
     h1Controller.enabled = !h1Controller.enabled;
+  } else if (activeController === 'b2' && b2Controller) {
+    b2Controller.enabled = !b2Controller.enabled;
+  } else if (activeController === 'g1' && g1Controller) {
+    g1Controller.enabled = !g1Controller.enabled;
+  } else if (activeController === 'h1_2' && h1_2Controller) {
+    h1_2Controller.enabled = !h1_2Controller.enabled;
   } else if (activeController === 'factory' && factoryController) {
     factoryController.enabled = !factoryController.enabled;
   }
@@ -467,17 +572,23 @@ function handleInput() {
   if (touchRotL) turn = 0.5;
   if (touchRotR) turn = -0.5;
 
-  if (activeController === 'go2' && go2Controller && go2Controller.enabled) {
-    go2Controller.setCommand(fwd, lat, turn);
+  // Send commands to active controller
+  const ctrl = getActiveCtrl();
+  if (ctrl && ctrl.enabled && ctrl.setCommand) {
+    ctrl.setCommand(fwd, lat, turn);
   }
-  if (activeController === 'go2rl' && go2RlController && go2RlController.enabled) {
-    go2RlController.setCommand(fwd, lat, turn);
-  }
-  if (activeController === 'h1' && h1Controller && h1Controller.enabled) {
-    h1Controller.setCommand(fwd, lat, turn);
-  }
-  if (activeController === 'factory' && factoryController && factoryController.enabled) {
-    factoryController.setCommand(fwd, lat, turn);
+}
+
+function getActiveCtrl() {
+  switch (activeController) {
+    case 'go2': return go2Controller;
+    case 'go2rl': return go2RlController;
+    case 'h1': return h1Controller;
+    case 'b2': return b2Controller;
+    case 'g1': return g1Controller;
+    case 'h1_2': return h1_2Controller;
+    case 'factory': return factoryController;
+    default: return null;
   }
 }
 
@@ -543,6 +654,12 @@ function followCamera() {
   const y = data.xpos[rootBody * 3 + 1];
   const z = data.xpos[rootBody * 3 + 2];
   controls.target.lerp(new THREE.Vector3(x, z, -y), 0.05);
+}
+
+function stepController() {
+  const ctrl = getActiveCtrl();
+  if (!ctrl) return;
+  if (ctrl.step) ctrl.step();
 }
 
 // ─── Mobile / Pointer Controls ──────────────────────────────────────
@@ -651,10 +768,7 @@ function setupControls() {
       const nsteps = Math.min(Math.round(frameDt / timestep * simSpeed), MAX_SUBSTEPS);
 
       for (let s = 0; s < nsteps; s++) {
-        if (activeController === 'go2' && go2Controller) go2Controller.step();
-        if (activeController === 'go2rl' && go2RlController) go2RlController.step();
-        if (activeController === 'h1' && h1Controller) h1Controller.step();
-        if (activeController === 'factory' && factoryController) factoryController.step();
+        stepController();
         mujoco.mj_step(model, data);
         stepCounter++;
       }
