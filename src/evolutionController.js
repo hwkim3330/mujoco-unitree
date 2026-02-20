@@ -14,30 +14,30 @@
 // Each gene has: name, min, max, default
 const QUADRUPED_GENES = [
   { name: 'frequency',  min: 1.0,  max: 4.0,  def: 2.5  },
-  { name: 'thighAmp',   min: 0.05, max: 0.5,  def: 0.25 },
-  { name: 'calfAmp',    min: 0.05, max: 0.5,  def: 0.25 },
-  { name: 'hipAmp',     min: 0.01, max: 0.1,  def: 0.04 },
-  { name: 'balanceKp',  min: 20,   max: 120,  def: 60   },
-  { name: 'balanceKd',  min: 1,    max: 15,   def: 5    },
+  { name: 'thighAmp',   min: 0.05, max: 0.5,  def: 0.20 },
+  { name: 'calfAmp',    min: 0.05, max: 0.5,  def: 0.20 },
+  { name: 'hipAmp',     min: 0.01, max: 0.1,  def: 0.03 },
+  { name: 'balanceKp',  min: 10,   max: 60,   def: 30   },
+  { name: 'balanceKd',  min: 1,    max: 8,    def: 3    },
   { name: 'homeThigh',  min: 0.5,  max: 1.3,  def: 0.9  },
   { name: 'homeCalf',   min: -2.2, max: -1.2, def: -1.8 },
-  { name: 'hipKp',      min: 50,   max: 250,  def: 120  },
-  { name: 'thighKp',    min: 80,   max: 400,  def: 200  },
-  { name: 'calfKp',     min: 100,  max: 500,  def: 250  },
+  { name: 'hipKp',      min: 20,   max: 80,   def: 40   },
+  { name: 'thighKp',    min: 20,   max: 90,   def: 45   },
+  { name: 'calfKp',     min: 40,   max: 150,  def: 80   },
 ];
 
 const HUMANOID_GENES = [
   { name: 'frequency',     min: 0.5,  max: 3.0,  def: 1.2  },
-  { name: 'hipPitchAmp',   min: 0.05, max: 0.6,  def: 0.3  },
-  { name: 'kneeBend',      min: 0.1,  max: 0.8,  def: 0.4  },
-  { name: 'anklePitchAmp', min: 0.05, max: 0.5,  def: 0.2  },
-  { name: 'hipRollAmp',    min: 0.01, max: 0.15, def: 0.05 },
+  { name: 'hipPitchAmp',   min: 0.05, max: 0.5,  def: 0.25 },
+  { name: 'kneeBend',      min: 0.1,  max: 0.6,  def: 0.35 },
+  { name: 'anklePitchAmp', min: 0.05, max: 0.3,  def: 0.15 },
+  { name: 'hipRollAmp',    min: 0.01, max: 0.10, def: 0.03 },
   { name: 'armSwingAmp',   min: 0.0,  max: 0.5,  def: 0.2  },
-  { name: 'balanceKp',     min: 100,  max: 800,  def: 300  },
-  { name: 'balanceKd',     min: 5,    max: 50,   def: 15   },
+  { name: 'balanceKp',     min: 50,   max: 300,  def: 150  },
+  { name: 'balanceKd',     min: 3,    max: 25,   def: 10   },
   { name: 'stanceWidth',   min: 0.0,  max: 0.15, def: 0.05 },
   { name: 'leanForward',   min: -0.1, max: 0.2,  def: 0.05 },
-  { name: 'legKp',         min: 200,  max: 1500, def: 800  },
+  { name: 'legKp',         min: 100,  max: 600,  def: 350  },
 ];
 
 // ─── Genetic Algorithm ─────────────────────────────────────────────
@@ -352,7 +352,7 @@ export class EvolutionController {
 
   // ─── Persistence (localStorage) ─────────────────────────────────
 
-  static STORAGE_KEY = 'mujoco-evo-h1';
+  static STORAGE_KEY = 'mujoco-evo-h1-v2';
 
   /**
    * Serialize GA state to a plain object for JSON storage.

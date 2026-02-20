@@ -6,10 +6,9 @@
  *  1: FL_thigh (hip flex)   4: FR_thigh  7: RL_thigh  10: RR_thigh
  *  2: FL_calf  (knee)       5: FR_calf   8: RL_calf   11: RR_calf
  *
- * Trot gait: diagonal pairs in phase (FL+RR, FR+RL).
- *
- * Home keyframe: hip=0, thigh=0.9, calf=-1.8
- * Standing height: ~0.27m (keyframe) to ~0.33m (natural stance)
+ * Torque limits: hip/thigh ±23.7 Nm, knee ±45.43 Nm
+ * Joint damping: 2.0 (high passive damping)
+ * Mass: ~7kg
  */
 
 export class Go2CpgController {
@@ -22,29 +21,29 @@ export class Go2CpgController {
     this.simDt = model.opt.timestep || 0.002;
 
     // Gait parameters
-    this.frequency = 2.5;        // Hz (trot cadence)
+    this.frequency = 2.5;
     this.phase = 0;
 
-    // Amplitudes
-    this.thighAmp = 0.25;        // Hip flexion swing
-    this.calfAmp = 0.25;         // Knee bend during swing
-    this.hipAmp = 0.04;          // Abduction for lateral balance
+    // Amplitudes — conservative to stay within torque budget
+    this.thighAmp = 0.20;
+    this.calfAmp = 0.20;
+    this.hipAmp = 0.03;
 
-    // PD gains — Go2 is ~7kg, needs moderate gains
-    this.hipKp = 120;  this.hipKd = 4;
-    this.thighKp = 200; this.thighKd = 6;
-    this.calfKp = 250;  this.calfKd = 8;
+    // PD gains — tuned for ±23.7 Nm (hip/thigh), ±45.43 Nm (knee)
+    // Target: produce ~50% max torque at 0.2 rad error
+    this.hipKp = 40;   this.hipKd = 2;
+    this.thighKp = 45;  this.thighKd = 3;
+    this.calfKp = 80;   this.calfKd = 5;
 
-    // Balance feedback
-    this.balanceKp = 60;
-    this.balanceKd = 5;
+    // Balance feedback — gentle to avoid torque saturation
+    this.balanceKp = 30;
+    this.balanceKd = 3;
 
     // Home pose
     this.homeHip = 0;
     this.homeThigh = 0.9;
     this.homeCalf = -1.8;
 
-    // Leg definitions: [hipActIdx, thighActIdx, calfActIdx, phaseOffset, side]
     // Trot: FL+RR (phase 0), FR+RL (phase π)
     this.legs = {
       FL: { act: [0, 1, 2],   phase: 0,         side: 1,  prefix: 'FL' },
@@ -53,17 +52,13 @@ export class Go2CpgController {
       RR: { act: [9, 10, 11], phase: 0,          side: -1, prefix: 'RR' },
     };
 
-    // Joint indices (qpos/qvel)
     this.jntQpos = {};
     this.jntDof = {};
     this.findJointIndices();
 
-    // Commands
     this.forwardSpeed = 0;
     this.lateralSpeed = 0;
     this.turnRate = 0;
-
-    // Balance state
     this.prevPitch = 0;
     this.prevRoll = 0;
   }
@@ -75,7 +70,6 @@ export class Go2CpgController {
       'RL_hip_joint', 'RL_thigh_joint', 'RL_calf_joint',
       'RR_hip_joint', 'RR_thigh_joint', 'RR_calf_joint',
     ];
-
     for (const name of jointNames) {
       try {
         const jid = this.mujoco.mj_name2id(this.model, 3, name);
@@ -83,7 +77,7 @@ export class Go2CpgController {
           this.jntQpos[name] = this.model.jnt_qposadr[jid];
           this.jntDof[name] = this.model.jnt_dofadr[jid];
         }
-      } catch (e) { /* fallback */ }
+      } catch (e) { /* ignore */ }
     }
   }
 
@@ -94,11 +88,8 @@ export class Go2CpgController {
   }
 
   getTrunkOrientation() {
-    const qw = this.data.qpos[3];
-    const qx = this.data.qpos[4];
-    const qy = this.data.qpos[5];
-    const qz = this.data.qpos[6];
-
+    const qw = this.data.qpos[3], qx = this.data.qpos[4];
+    const qy = this.data.qpos[5], qz = this.data.qpos[6];
     const sinp = 2 * (qw * qy - qz * qx);
     const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp) * Math.PI / 2 : Math.asin(sinp);
     const roll = Math.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy));
@@ -109,7 +100,6 @@ export class Go2CpgController {
     const qIdx = this.jntQpos[jointName];
     const dIdx = this.jntDof[jointName];
     if (qIdx === undefined) return 0;
-
     const q = this.data.qpos[qIdx];
     const qdot = this.data.qvel[dIdx] || 0;
     return kp * (target - q) - kd * qdot;
@@ -118,11 +108,10 @@ export class Go2CpgController {
   step() {
     if (!this.enabled) return;
 
-    // Advance phase
     this.phase += 2 * Math.PI * this.frequency * this.simDt;
     if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
 
-    // Compute effective amplitude — activate gait for ANY command (lateral/turn too)
+    // Activate gait for ANY command
     const fwdMag = Math.abs(this.forwardSpeed);
     const latMag = Math.abs(this.lateralSpeed);
     const turnMag = Math.abs(this.turnRate);
@@ -131,7 +120,6 @@ export class Go2CpgController {
       ? Math.max(0.3, fwdMag + latMag * 0.5 + turnMag * 0.3) : 0;
     const direction = Math.sign(this.forwardSpeed) || 1;
 
-    // Trunk orientation for balance
     const { pitch, roll } = this.getTrunkOrientation();
     const pitchRate = (pitch - this.prevPitch) / this.simDt;
     const rollRate = (roll - this.prevRoll) / this.simDt;
@@ -147,30 +135,22 @@ export class Go2CpgController {
       const legPhase = this.phase + leg.phase;
       const swing = Math.sin(legPhase);
       const isSwing = swing > 0;
-
-      // Front/back distinction for turn
       const isFront = name.startsWith('F');
       const turnSign = isFront ? 1 : -1;
 
-      // Thigh (hip flexion): swing forward/back
       const thighTarget = this.homeThigh
         - direction * this.thighAmp * ampScale * swing
-        + this.turnRate * 0.15 * turnSign * leg.side;
+        + this.turnRate * 0.10 * turnSign * leg.side;
 
-      // Calf (knee): bend during swing for foot clearance + stance push-off
       const swingLift = isSwing ? Math.sin(legPhase) : 0;
-      const stancePush = !isSwing ? Math.sin(legPhase + Math.PI) * 0.08 : 0;
       const calfTarget = this.homeCalf
-        - this.calfAmp * ampScale * swingLift
-        + stancePush * ampScale;
+        - this.calfAmp * ampScale * swingLift;
 
-      // Hip (abduction): lateral movement + balance
       const hipTarget = this.homeHip
         + leg.side * this.hipAmp * (isSwing ? 1 : -1) * ampScale
-        + this.lateralSpeed * 0.25 * leg.side
-        + this.turnRate * 0.04 * turnSign;
+        + this.lateralSpeed * 0.15 * leg.side
+        + this.turnRate * 0.03 * turnSign;
 
-      // PD torques
       const hipJoint = `${leg.prefix}_hip_joint`;
       const thighJoint = `${leg.prefix}_thigh_joint`;
       const calfJoint = `${leg.prefix}_calf_joint`;
@@ -179,10 +159,9 @@ export class Go2CpgController {
       ctrl[leg.act[1]] = this.pdTorque(thighJoint, thighTarget, this.thighKp, this.thighKd);
       ctrl[leg.act[2]] = this.pdTorque(calfJoint, calfTarget, this.calfKp, this.calfKd);
 
-      // Balance corrections on thigh, hip, and calf
-      ctrl[leg.act[1]] += pitchCorr * 0.2;
-      ctrl[leg.act[0]] += rollCorr * 0.15 * leg.side;
-      ctrl[leg.act[2]] += pitchCorr * 0.08; // calf helps with pitch
+      // Balance corrections (small fractions to stay within torque budget)
+      ctrl[leg.act[1]] += pitchCorr * 0.15;
+      ctrl[leg.act[0]] += rollCorr * 0.10 * leg.side;
     }
 
     // Clamp to actuator ranges

@@ -43,9 +43,9 @@ export class H1CpgController {
     // Arm swing
     this.armSwingGain = 0.3;
 
-    // PD gains for balance (applied as torque corrections)
-    this.balanceKp = 300.0;
-    this.balanceKd = 20.0;
+    // PD gains for balance — ankle is only ±40 Nm!
+    this.balanceKp = 150.0;
+    this.balanceKd = 10.0;
 
     // Home pose (joint targets at stance)
     this.homeQpos = {
@@ -156,12 +156,12 @@ export class H1CpgController {
     this.prevPitch = pitch;
     this.prevRoll = roll;
 
-    // PD gains
-    const hipKp = 800, hipKd = 30;
-    const kneeKp = 1200, kneeKd = 40;
-    const ankleKp = 200, ankleKd = 10;
-    const torsoKp = 600, torsoKd = 25;
-    const armKp = 50, armKd = 3;
+    // PD gains — tuned for ±200 (hip), ±300 (knee), ±40 (ankle!) Nm
+    const hipKp = 350, hipKd = 15;
+    const kneeKp = 500, kneeKd = 20;
+    const ankleKp = 60, ankleKd = 4;
+    const torsoKp = 300, torsoKd = 12;
+    const armKp = 40, armKd = 2;
 
     const ctrl = this.data.ctrl;
 
@@ -217,12 +217,13 @@ export class H1CpgController {
     const pitchCorrection = -this.balanceKp * pitch - this.balanceKd * pitchRate;
     const rollCorrection = -this.balanceKp * roll - this.balanceKd * rollRate;
 
-    ctrl[this.actIdx.left_ankle] += pitchCorrection * 0.4;
-    ctrl[this.actIdx.right_ankle] += pitchCorrection * 0.4;
-    ctrl[this.actIdx.left_hip_pitch] += pitchCorrection * 0.5;
-    ctrl[this.actIdx.right_hip_pitch] += pitchCorrection * 0.5;
-    ctrl[this.actIdx.left_hip_roll] += rollCorrection * 0.3;
-    ctrl[this.actIdx.right_hip_roll] -= rollCorrection * 0.3;
+    // Ankle ±40 Nm is the bottleneck — keep corrections small there
+    ctrl[this.actIdx.left_ankle] += pitchCorrection * 0.15;
+    ctrl[this.actIdx.right_ankle] += pitchCorrection * 0.15;
+    ctrl[this.actIdx.left_hip_pitch] += pitchCorrection * 0.3;
+    ctrl[this.actIdx.right_hip_pitch] += pitchCorrection * 0.3;
+    ctrl[this.actIdx.left_hip_roll] += rollCorrection * 0.2;
+    ctrl[this.actIdx.right_hip_roll] -= rollCorrection * 0.2;
 
     // --- ARMS (opposite to legs) ---
     const leftArmSwing = -this.armSwingGain * direction * ampScale * leftSwing;

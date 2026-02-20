@@ -33,11 +33,11 @@ class SingleH1CPG {
     this.anklePitchAmp = 0.15;
     this.hipRollAmp = 0.03;
     this.armSwingAmp = 0.3;
-    this.balanceKp = 300;
-    this.balanceKd = 20;
+    this.balanceKp = 150;
+    this.balanceKd = 10;
     this.stanceWidth = 0.05;
     this.leanForward = 0.05;
-    this.legKp = 800;
+    this.legKp = 350;
 
     // ─── Fixed parameters ───
     this.phase = 0;
@@ -142,17 +142,17 @@ class SingleH1CPG {
     this.prevPitch = pitch;
     this.prevRoll = roll;
 
-    // PD gains derived from genome
+    // PD gains derived from genome — ankle ±40 Nm is the bottleneck!
     const hipKp = this.legKp;
     const hipKd = this.legKp * 0.04;
-    const kneeKp = this.legKp * 1.5;
+    const kneeKp = this.legKp * 1.4;
     const kneeKd = kneeKp * 0.04;
-    const ankleKp = this.legKp * 0.25;
-    const ankleKd = ankleKp * 0.05;
-    const torsoKp = this.legKp * 0.75;
+    const ankleKp = Math.min(this.legKp * 0.17, 60);  // cap at 60 for ±40 Nm limit
+    const ankleKd = ankleKp * 0.07;
+    const torsoKp = this.legKp * 0.85;
     const torsoKd = torsoKp * 0.04;
-    const armKp = 50;
-    const armKd = 3;
+    const armKp = 40;
+    const armKd = 2;
 
     const ctrl = this.data.ctrl;
     const base = this.actBase;
@@ -208,12 +208,13 @@ class SingleH1CPG {
     const pitchCorr = -this.balanceKp * pitch - this.balanceKd * pitchRate;
     const rollCorr = -this.balanceKp * roll - this.balanceKd * rollRate;
 
-    ctrl[base + this.actOff.left_ankle] += pitchCorr * 0.4;
-    ctrl[base + this.actOff.right_ankle] += pitchCorr * 0.4;
-    ctrl[base + this.actOff.left_hip_pitch] += pitchCorr * 0.5;
-    ctrl[base + this.actOff.right_hip_pitch] += pitchCorr * 0.5;
-    ctrl[base + this.actOff.left_hip_roll] += rollCorr * 0.3;
-    ctrl[base + this.actOff.right_hip_roll] -= rollCorr * 0.3;
+    // Ankle ±40 Nm bottleneck — keep corrections small
+    ctrl[base + this.actOff.left_ankle] += pitchCorr * 0.15;
+    ctrl[base + this.actOff.right_ankle] += pitchCorr * 0.15;
+    ctrl[base + this.actOff.left_hip_pitch] += pitchCorr * 0.3;
+    ctrl[base + this.actOff.right_hip_pitch] += pitchCorr * 0.3;
+    ctrl[base + this.actOff.left_hip_roll] += rollCorr * 0.2;
+    ctrl[base + this.actOff.right_hip_roll] -= rollCorr * 0.2;
 
     // --- ARMS ---
     const lArmSwing = -this.armSwingAmp * direction * ampScale * lSwing;

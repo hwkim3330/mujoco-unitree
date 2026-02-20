@@ -29,14 +29,14 @@ class SingleRobotCPG {
     this.calfAmp = 0.25;
     this.hipAmp = 0.04;
 
-    // PD gains
-    this.hipKp = 120;  this.hipKd = 4;
-    this.thighKp = 200; this.thighKd = 6;
-    this.calfKp = 250;  this.calfKd = 8;
+    // PD gains — tuned for Go2 ±23.7 Nm (hip/thigh), ±45.43 Nm (knee)
+    this.hipKp = 40;   this.hipKd = 2;
+    this.thighKp = 45;  this.thighKd = 3;
+    this.calfKp = 80;   this.calfKd = 5;
 
-    // Balance
-    this.balanceKp = 60;
-    this.balanceKd = 5;
+    // Balance — gentle to avoid torque saturation
+    this.balanceKp = 30;
+    this.balanceKd = 3;
 
     // Home pose
     this.homeHip = 0;

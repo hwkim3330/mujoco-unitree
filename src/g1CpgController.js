@@ -41,9 +41,9 @@ export class G1CpgController {
     this.waistPitchGain = 0.15;
     this.waistRollGain = 0.10;
 
-    // Balance
-    this.balanceKp = 200.0;
-    this.balanceKd = 15.0;
+    // Balance — hip ±88, knee ±139, ankle ±50 Nm, damping 0.05
+    this.balanceKp = 100.0;
+    this.balanceKd = 8.0;
 
     // Home pose
     this.homeQpos = {
@@ -155,11 +155,13 @@ export class G1CpgController {
     this.prevPitch = pitch;
     this.prevRoll = roll;
 
-    const hipKp = 400, hipKd = 15;
-    const kneeKp = 600, kneeKd = 20;
-    const ankleKp = 100, ankleKd = 5;
-    const waistKp = 300, waistKd = 12;
-    const armKp = 30, armKd = 2;
+    // PD gains — tuned for ±88 (hip), ±139 (knee), ±50 (ankle) Nm
+    // Low damping (0.05) means higher Kd needed for stability
+    const hipKp = 150, hipKd = 10;
+    const kneeKp = 250, kneeKd = 15;
+    const ankleKp = 70, ankleKd = 5;
+    const waistKp = 150, waistKd = 8;
+    const armKp = 20, armKd = 1.5;
 
     const ctrl = this.data.ctrl;
 
@@ -212,14 +214,14 @@ export class G1CpgController {
     const pCorr = -this.balanceKp * pitch - this.balanceKd * pitchRate;
     const rCorr = -this.balanceKp * roll - this.balanceKd * rollRate;
 
-    ctrl[this.actIdx.left_ankle_pitch_joint] += pCorr * 0.4;
-    ctrl[this.actIdx.right_ankle_pitch_joint] += pCorr * 0.4;
-    ctrl[this.actIdx.left_ankle_roll_joint] += rCorr * 0.3;
-    ctrl[this.actIdx.right_ankle_roll_joint] -= rCorr * 0.3;
-    ctrl[this.actIdx.left_hip_pitch_joint] += pCorr * 0.4;
-    ctrl[this.actIdx.right_hip_pitch_joint] += pCorr * 0.4;
-    ctrl[this.actIdx.left_hip_roll_joint] += rCorr * 0.3;
-    ctrl[this.actIdx.right_hip_roll_joint] -= rCorr * 0.3;
+    ctrl[this.actIdx.left_ankle_pitch_joint] += pCorr * 0.25;
+    ctrl[this.actIdx.right_ankle_pitch_joint] += pCorr * 0.25;
+    ctrl[this.actIdx.left_ankle_roll_joint] += rCorr * 0.2;
+    ctrl[this.actIdx.right_ankle_roll_joint] -= rCorr * 0.2;
+    ctrl[this.actIdx.left_hip_pitch_joint] += pCorr * 0.3;
+    ctrl[this.actIdx.right_hip_pitch_joint] += pCorr * 0.3;
+    ctrl[this.actIdx.left_hip_roll_joint] += rCorr * 0.2;
+    ctrl[this.actIdx.right_hip_roll_joint] -= rCorr * 0.2;
 
     // --- ARMS ---
     const lArm = -this.armSwingGain * direction * ampScale * lS;
