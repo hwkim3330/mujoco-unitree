@@ -28270,55 +28270,64 @@ function buildMaterial(model2, g) {
 }
 
 // src/assetLoader.js
+var GO2_MESHES = [
+  "unitree_go2/go2.xml",
+  "unitree_go2/assets/base_0.obj",
+  "unitree_go2/assets/base_1.obj",
+  "unitree_go2/assets/base_2.obj",
+  "unitree_go2/assets/base_3.obj",
+  "unitree_go2/assets/base_4.obj",
+  "unitree_go2/assets/hip_0.obj",
+  "unitree_go2/assets/hip_1.obj",
+  "unitree_go2/assets/thigh_0.obj",
+  "unitree_go2/assets/thigh_1.obj",
+  "unitree_go2/assets/thigh_mirror_0.obj",
+  "unitree_go2/assets/thigh_mirror_1.obj",
+  "unitree_go2/assets/calf_0.obj",
+  "unitree_go2/assets/calf_1.obj",
+  "unitree_go2/assets/calf_mirror_0.obj",
+  "unitree_go2/assets/calf_mirror_1.obj",
+  "unitree_go2/assets/foot.obj"
+];
+var H1_MESHES = [
+  "unitree_h1/h1.xml",
+  "unitree_h1/assets/pelvis.stl",
+  "unitree_h1/assets/torso_link.stl",
+  "unitree_h1/assets/logo_link.stl",
+  "unitree_h1/assets/left_hip_yaw_link.stl",
+  "unitree_h1/assets/left_hip_roll_link.stl",
+  "unitree_h1/assets/left_hip_pitch_link.stl",
+  "unitree_h1/assets/left_knee_link.stl",
+  "unitree_h1/assets/left_ankle_link.stl",
+  "unitree_h1/assets/right_hip_yaw_link.stl",
+  "unitree_h1/assets/right_hip_roll_link.stl",
+  "unitree_h1/assets/right_hip_pitch_link.stl",
+  "unitree_h1/assets/right_knee_link.stl",
+  "unitree_h1/assets/right_ankle_link.stl",
+  "unitree_h1/assets/left_shoulder_pitch_link.stl",
+  "unitree_h1/assets/left_shoulder_roll_link.stl",
+  "unitree_h1/assets/left_shoulder_yaw_link.stl",
+  "unitree_h1/assets/left_elbow_link.stl",
+  "unitree_h1/assets/right_shoulder_pitch_link.stl",
+  "unitree_h1/assets/right_shoulder_roll_link.stl",
+  "unitree_h1/assets/right_shoulder_yaw_link.stl",
+  "unitree_h1/assets/right_elbow_link.stl"
+];
 var SCENE_ASSETS = {
   "unitree_go2/scene.xml": {
-    files: [
-      "unitree_go2/scene.xml",
-      "unitree_go2/go2.xml",
-      "unitree_go2/assets/base_0.obj",
-      "unitree_go2/assets/base_1.obj",
-      "unitree_go2/assets/base_2.obj",
-      "unitree_go2/assets/base_3.obj",
-      "unitree_go2/assets/base_4.obj",
-      "unitree_go2/assets/hip_0.obj",
-      "unitree_go2/assets/hip_1.obj",
-      "unitree_go2/assets/thigh_0.obj",
-      "unitree_go2/assets/thigh_1.obj",
-      "unitree_go2/assets/thigh_mirror_0.obj",
-      "unitree_go2/assets/thigh_mirror_1.obj",
-      "unitree_go2/assets/calf_0.obj",
-      "unitree_go2/assets/calf_1.obj",
-      "unitree_go2/assets/calf_mirror_0.obj",
-      "unitree_go2/assets/calf_mirror_1.obj",
-      "unitree_go2/assets/foot.obj"
-    ]
+    files: ["unitree_go2/scene.xml", ...GO2_MESHES]
+  },
+  "unitree_go2/scene_stairs.xml": {
+    files: ["unitree_go2/scene_stairs.xml", ...GO2_MESHES]
+  },
+  "unitree_go2/scene_rough.xml": {
+    files: ["unitree_go2/scene_rough.xml", ...GO2_MESHES]
   },
   "unitree_h1/scene.xml": {
-    files: [
-      "unitree_h1/scene.xml",
-      "unitree_h1/h1.xml",
-      "unitree_h1/assets/pelvis.stl",
-      "unitree_h1/assets/torso_link.stl",
-      "unitree_h1/assets/logo_link.stl",
-      "unitree_h1/assets/left_hip_yaw_link.stl",
-      "unitree_h1/assets/left_hip_roll_link.stl",
-      "unitree_h1/assets/left_hip_pitch_link.stl",
-      "unitree_h1/assets/left_knee_link.stl",
-      "unitree_h1/assets/left_ankle_link.stl",
-      "unitree_h1/assets/right_hip_yaw_link.stl",
-      "unitree_h1/assets/right_hip_roll_link.stl",
-      "unitree_h1/assets/right_hip_pitch_link.stl",
-      "unitree_h1/assets/right_knee_link.stl",
-      "unitree_h1/assets/right_ankle_link.stl",
-      "unitree_h1/assets/left_shoulder_pitch_link.stl",
-      "unitree_h1/assets/left_shoulder_roll_link.stl",
-      "unitree_h1/assets/left_shoulder_yaw_link.stl",
-      "unitree_h1/assets/left_elbow_link.stl",
-      "unitree_h1/assets/right_shoulder_pitch_link.stl",
-      "unitree_h1/assets/right_shoulder_roll_link.stl",
-      "unitree_h1/assets/right_shoulder_yaw_link.stl",
-      "unitree_h1/assets/right_elbow_link.stl"
-    ]
+    files: ["unitree_h1/scene.xml", ...H1_MESHES]
+  },
+  "unitree_h1/scene_stairs.xml": {
+    files: ["unitree_h1/scene_stairs.xml", ...H1_MESHES]
   }
 };
 var loaded = /* @__PURE__ */ new Set();
@@ -28807,9 +28816,21 @@ var SCENES = {
     controller: "go2",
     camera: { pos: [1.5, 1, 1.5], target: [0, 0.25, 0] }
   },
+  "unitree_go2/scene_stairs.xml": {
+    controller: "go2",
+    camera: { pos: [2, 1.5, 2], target: [1.2, 0.15, 0] }
+  },
+  "unitree_go2/scene_rough.xml": {
+    controller: "go2",
+    camera: { pos: [1.5, 1, 1.5], target: [0.5, 0.1, 0] }
+  },
   "unitree_h1/scene.xml": {
     controller: "h1",
     camera: { pos: [3, 2, 3], target: [0, 0.9, 0] }
+  },
+  "unitree_h1/scene_stairs.xml": {
+    controller: "h1",
+    camera: { pos: [4, 2.5, 3.5], target: [2, 0.5, 0] }
   }
 };
 var currentScenePath = "unitree_go2/scene.xml";
@@ -28902,7 +28923,7 @@ function clearScene() {
 async function loadScene(scenePath) {
   setStatus(`Loading: ${scenePath}`);
   await loadSceneAssets(mujoco, scenePath, setStatus);
-  currentObstacleScale = scenePath.includes("go2") ? 2.5 : 3.5;
+  currentObstacleScale = scenePath.includes("h1") ? 3.5 : 2.5;
   const originalXml = new TextDecoder().decode(mujoco.FS.readFile("/working/" + scenePath));
   const arenaXml = generateArenaXML(originalXml, currentObstacleScale);
   const arenaPath = scenePath.replace(".xml", "_arena.xml");

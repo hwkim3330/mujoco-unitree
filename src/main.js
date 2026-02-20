@@ -88,9 +88,21 @@ const SCENES = {
     controller: 'go2',
     camera: { pos: [1.5, 1.0, 1.5], target: [0, 0.25, 0] },
   },
+  'unitree_go2/scene_stairs.xml': {
+    controller: 'go2',
+    camera: { pos: [2.0, 1.5, 2.0], target: [1.2, 0.15, 0] },
+  },
+  'unitree_go2/scene_rough.xml': {
+    controller: 'go2',
+    camera: { pos: [1.5, 1.0, 1.5], target: [0.5, 0.1, 0] },
+  },
   'unitree_h1/scene.xml': {
     controller: 'h1',
     camera: { pos: [3.0, 2.0, 3.0], target: [0, 0.9, 0] },
+  },
+  'unitree_h1/scene_stairs.xml': {
+    controller: 'h1',
+    camera: { pos: [4.0, 2.5, 3.5], target: [2.0, 0.5, 0] },
   },
 };
 
@@ -199,7 +211,7 @@ async function loadScene(scenePath) {
 
   await loadSceneAssets(mujoco, scenePath, setStatus);
 
-  currentObstacleScale = scenePath.includes('go2') ? 2.5 : 3.5;
+  currentObstacleScale = scenePath.includes('h1') ? 3.5 : 2.5;
   const originalXml = new TextDecoder().decode(mujoco.FS.readFile('/working/' + scenePath));
   const arenaXml = generateArenaXML(originalXml, currentObstacleScale);
   const arenaPath = scenePath.replace('.xml', '_arena.xml');
