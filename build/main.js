@@ -30750,43 +30750,50 @@ var H1OnnxController = class {
     this.defaultAngles = new Float32Array([
       0,
       0,
-      -0.4,
-      0.8,
-      -0.4,
+      -0.1,
+      0.3,
+      -0.2,
       0,
       0,
-      -0.4,
-      0.8,
-      -0.4
+      -0.1,
+      0.3,
+      -0.2
     ]);
     this.kp = new Float32Array([
       150,
       150,
-      200,
+      150,
       200,
       40,
-      // left leg
+      // left: yaw, roll, pitch, knee, ankle
       150,
       150,
-      200,
+      150,
       200,
       40
-      // right leg
+      // right
     ]);
     this.kd = new Float32Array([
-      5,
-      5,
-      5,
-      5,
       2,
-      // left leg
-      5,
-      5,
-      5,
-      5,
+      2,
+      2,
+      4,
+      2,
+      // left
+      2,
+      2,
+      2,
+      4,
       2
-      // right leg
+      // right
     ]);
+    this.obsScales = {
+      angVel: 0.25,
+      dofPos: 1,
+      dofVel: 0.05,
+      cmdScale: [2, 2, 0.25]
+      // [vx, vy, wz]
+    };
     this.phase = 0;
     this.gaitFreq = 1.25;
     this.ctrlDt = this.decimation * this.simDt;
@@ -30851,7 +30858,7 @@ var H1OnnxController = class {
     for (let i = 0; i < 10; i++) {
       this.data.qpos[this.jntQpos[i]] = this.defaultAngles[i];
     }
-    this.data.qpos[2] = 1.06;
+    this.data.qpos[2] = 1;
     for (let i = 0; i < this.model.nv; i++) this.data.qvel[i] = 0;
     this.mujoco.mj_forward(this.model, this.data);
   }
@@ -30873,22 +30880,23 @@ var H1OnnxController = class {
   }
   buildObs() {
     const obs = new Float32Array(41);
+    const s = this.obsScales;
     const gyro = this.rotateByInvQuat(this.data.qvel[3], this.data.qvel[4], this.data.qvel[5]);
-    obs[0] = gyro[0];
-    obs[1] = gyro[1];
-    obs[2] = gyro[2];
+    obs[0] = gyro[0] * s.angVel;
+    obs[1] = gyro[1] * s.angVel;
+    obs[2] = gyro[2] * s.angVel;
     const grav = this.rotateByInvQuat(0, 0, -1);
     obs[3] = grav[0];
     obs[4] = grav[1];
     obs[5] = grav[2];
-    obs[6] = this.forwardSpeed;
-    obs[7] = this.lateralSpeed;
-    obs[8] = this.turnRate;
+    obs[6] = this.forwardSpeed * s.cmdScale[0];
+    obs[7] = this.lateralSpeed * s.cmdScale[1];
+    obs[8] = this.turnRate * s.cmdScale[2];
     for (let i = 0; i < 10; i++) {
-      obs[9 + i] = this.data.qpos[this.jntQpos[i]] - this.defaultAngles[i];
+      obs[9 + i] = (this.data.qpos[this.jntQpos[i]] - this.defaultAngles[i]) * s.dofPos;
     }
     for (let i = 0; i < 10; i++) {
-      obs[19 + i] = this.data.qvel[this.jntDof[i]];
+      obs[19 + i] = this.data.qvel[this.jntDof[i]] * s.dofVel;
     }
     for (let i = 0; i < 10; i++) {
       obs[29 + i] = this.lastAction[i];
@@ -31492,52 +31500,58 @@ var H1_2OnnxController = class {
     this.actionScale = 0.25;
     this.defaultAngles = new Float32Array([
       0,
-      -0.4,
+      -0.16,
       0,
-      0.8,
-      -0.4,
+      0.36,
+      -0.2,
       0,
       // left leg
       0,
-      -0.4,
+      -0.16,
       0,
-      0.8,
-      -0.4,
+      0.36,
+      -0.2,
       0
       // right leg
     ]);
     this.kp = new Float32Array([
-      150,
       200,
-      150,
       200,
+      200,
+      300,
       40,
-      20,
-      // left leg
-      150,
-      200,
-      150,
-      200,
       40,
-      20
-      // right leg
+      // left: yaw, pitch, roll, knee, ank_p, ank_r
+      200,
+      200,
+      200,
+      300,
+      40,
+      40
+      // right
     ]);
     this.kd = new Float32Array([
-      5,
-      5,
-      5,
-      5,
+      2.5,
+      2.5,
+      2.5,
+      4,
       2,
       2,
-      // left leg
-      5,
-      5,
-      5,
-      5,
+      // left
+      2.5,
+      2.5,
+      2.5,
+      4,
       2,
       2
-      // right leg
+      // right
     ]);
+    this.obsScales = {
+      angVel: 0.25,
+      dofPos: 1,
+      dofVel: 0.05,
+      cmdScale: [2, 2, 0.25]
+    };
     this.phase = 0;
     this.gaitFreq = 1.25;
     this.ctrlDt = this.decimation * this.simDt;
@@ -31604,7 +31618,7 @@ var H1_2OnnxController = class {
     for (let i = 0; i < 12; i++) {
       this.data.qpos[this.jntQpos[i]] = this.defaultAngles[i];
     }
-    this.data.qpos[2] = 1.03;
+    this.data.qpos[2] = 1.05;
     for (let i = 0; i < this.model.nv; i++) this.data.qvel[i] = 0;
     this.mujoco.mj_forward(this.model, this.data);
   }
@@ -31626,22 +31640,23 @@ var H1_2OnnxController = class {
   }
   buildObs() {
     const obs = new Float32Array(47);
+    const s = this.obsScales;
     const gyro = this.rotateByInvQuat(this.data.qvel[3], this.data.qvel[4], this.data.qvel[5]);
-    obs[0] = gyro[0];
-    obs[1] = gyro[1];
-    obs[2] = gyro[2];
+    obs[0] = gyro[0] * s.angVel;
+    obs[1] = gyro[1] * s.angVel;
+    obs[2] = gyro[2] * s.angVel;
     const grav = this.rotateByInvQuat(0, 0, -1);
     obs[3] = grav[0];
     obs[4] = grav[1];
     obs[5] = grav[2];
-    obs[6] = this.forwardSpeed;
-    obs[7] = this.lateralSpeed;
-    obs[8] = this.turnRate;
+    obs[6] = this.forwardSpeed * s.cmdScale[0];
+    obs[7] = this.lateralSpeed * s.cmdScale[1];
+    obs[8] = this.turnRate * s.cmdScale[2];
     for (let i = 0; i < 12; i++) {
-      obs[9 + i] = this.data.qpos[this.jntQpos[i]] - this.defaultAngles[i];
+      obs[9 + i] = (this.data.qpos[this.jntQpos[i]] - this.defaultAngles[i]) * s.dofPos;
     }
     for (let i = 0; i < 12; i++) {
-      obs[21 + i] = this.data.qvel[this.jntDof[i]];
+      obs[21 + i] = this.data.qvel[this.jntDof[i]] * s.dofVel;
     }
     for (let i = 0; i < 12; i++) {
       obs[33 + i] = this.lastAction[i];

@@ -20,13 +20,15 @@
  *   - Hip chain: yaw → pitch → roll (H1 is yaw → roll → pitch)
  *   - All joint names have "_joint" suffix
  *
+ * Observation scaling (deploy_mujoco.py):
+ *   ang_vel *= 0.25, dof_vel *= 0.05, cmd *= [2.0, 2.0, 0.25]
+ *
  * LSTM hidden state (64-dim) maintained across steps.
  *
- * PD gains (from unitree_rl_gym training config):
- *   hip_yaw/roll: kp=150, kd=5
- *   hip_pitch/knee: kp=200, kd=5
- *   ankle_pitch: kp=40, kd=2
- *   ankle_roll: kp=20, kd=2
+ * PD gains (from unitree_rl_gym h1_2_config.py):
+ *   hip_yaw/pitch/roll: kp=200, kd=2.5
+ *   knee: kp=300, kd=4
+ *   ankle_pitch/roll: kp=40, kd=2
  */
 
 export class H1_2OnnxController {
@@ -47,25 +49,33 @@ export class H1_2OnnxController {
     // Action scale
     this.actionScale = 0.25;
 
-    // Default joint angles (standing pose)
+    // Default joint angles (from unitree_rl_gym h1_2_config.py)
     // Order: left_hip_yaw, left_hip_pitch, left_hip_roll, left_knee,
     //        left_ankle_pitch, left_ankle_roll,
     //        right_hip_yaw, right_hip_pitch, right_hip_roll, right_knee,
     //        right_ankle_pitch, right_ankle_roll
     this.defaultAngles = new Float32Array([
-      0, -0.4, 0, 0.8, -0.4, 0,   // left leg
-      0, -0.4, 0, 0.8, -0.4, 0,   // right leg
+      0, -0.16, 0, 0.36, -0.2, 0,   // left leg
+      0, -0.16, 0, 0.36, -0.2, 0,   // right leg
     ]);
 
-    // PD gains per joint (matching unitree_rl_gym training config)
+    // PD gains per joint (from unitree_rl_gym h1_2_config.py)
     this.kp = new Float32Array([
-      150, 200, 150, 200, 40, 20,   // left leg
-      150, 200, 150, 200, 40, 20,   // right leg
+      200, 200, 200, 300, 40, 40,   // left: yaw, pitch, roll, knee, ank_p, ank_r
+      200, 200, 200, 300, 40, 40,   // right
     ]);
     this.kd = new Float32Array([
-      5, 5, 5, 5, 2, 2,   // left leg
-      5, 5, 5, 5, 2, 2,   // right leg
+      2.5, 2.5, 2.5, 4, 2, 2,   // left
+      2.5, 2.5, 2.5, 4, 2, 2,   // right
     ]);
+
+    // Observation scaling (from unitree_rl_gym deploy config)
+    this.obsScales = {
+      angVel: 0.25,
+      dofPos: 1.0,
+      dofVel: 0.05,
+      cmdScale: [2.0, 2.0, 0.25],
+    };
 
     // Gait phase
     this.phase = 0.0;
@@ -138,8 +148,8 @@ export class H1_2OnnxController {
     for (let i = 0; i < 12; i++) {
       this.data.qpos[this.jntQpos[i]] = this.defaultAngles[i];
     }
-    // Standing height ~1.03m
-    this.data.qpos[2] = 1.03;
+    // Standing height (from h1_2_config.py: base_init_state pos z=1.05)
+    this.data.qpos[2] = 1.05;
     for (let i = 0; i < this.model.nv; i++) this.data.qvel[i] = 0;
     this.mujoco.mj_forward(this.model, this.data);
   }
@@ -163,31 +173,34 @@ export class H1_2OnnxController {
 
   buildObs() {
     const obs = new Float32Array(47);
+    const s = this.obsScales;
 
-    // [0:3] Angular velocity (body frame)
+    // [0:3] Angular velocity (body frame) * ang_vel_scale
     const gyro = this.rotateByInvQuat(this.data.qvel[3], this.data.qvel[4], this.data.qvel[5]);
-    obs[0] = gyro[0]; obs[1] = gyro[1]; obs[2] = gyro[2];
+    obs[0] = gyro[0] * s.angVel;
+    obs[1] = gyro[1] * s.angVel;
+    obs[2] = gyro[2] * s.angVel;
 
-    // [3:6] Projected gravity (body frame)
+    // [3:6] Projected gravity (body frame) — no scaling
     const grav = this.rotateByInvQuat(0, 0, -1);
     obs[3] = grav[0]; obs[4] = grav[1]; obs[5] = grav[2];
 
-    // [6:9] Velocity commands
-    obs[6] = this.forwardSpeed;
-    obs[7] = this.lateralSpeed;
-    obs[8] = this.turnRate;
+    // [6:9] Velocity commands * cmd_scale
+    obs[6] = this.forwardSpeed * s.cmdScale[0];
+    obs[7] = this.lateralSpeed * s.cmdScale[1];
+    obs[8] = this.turnRate * s.cmdScale[2];
 
-    // [9:21] Joint positions - defaults
+    // [9:21] Joint positions - defaults (* dof_pos_scale=1.0)
     for (let i = 0; i < 12; i++) {
-      obs[9 + i] = this.data.qpos[this.jntQpos[i]] - this.defaultAngles[i];
+      obs[9 + i] = (this.data.qpos[this.jntQpos[i]] - this.defaultAngles[i]) * s.dofPos;
     }
 
-    // [21:33] Joint velocities
+    // [21:33] Joint velocities * dof_vel_scale
     for (let i = 0; i < 12; i++) {
-      obs[21 + i] = this.data.qvel[this.jntDof[i]];
+      obs[21 + i] = this.data.qvel[this.jntDof[i]] * s.dofVel;
     }
 
-    // [33:45] Previous actions
+    // [33:45] Previous actions (no scaling)
     for (let i = 0; i < 12; i++) {
       obs[33 + i] = this.lastAction[i];
     }

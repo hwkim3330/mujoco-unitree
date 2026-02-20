@@ -17,9 +17,12 @@
  *
  * LSTM hidden state (64-dim) maintained across steps.
  *
- * PD gains (from unitree_rl_gym training config):
- *   hip_yaw/roll: kp=150, kd=5
- *   hip_pitch/knee: kp=200, kd=5
+ * Observation scaling (deploy_mujoco.py):
+ *   ang_vel *= 0.25, dof_vel *= 0.05, cmd *= [2.0, 2.0, 0.25]
+ *
+ * PD gains (from unitree_rl_gym h1_config.py):
+ *   hip_yaw/roll/pitch: kp=150, kd=2
+ *   knee: kp=200, kd=4
  *   ankle: kp=40, kd=2
  */
 
@@ -41,23 +44,31 @@ export class H1OnnxController {
     // Action scale
     this.actionScale = 0.25;
 
-    // Default joint angles (standing pose)
+    // Default joint angles (from unitree_rl_gym h1_config.py)
     // Order: left_hip_yaw, left_hip_roll, left_hip_pitch, left_knee, left_ankle,
     //        right_hip_yaw, right_hip_roll, right_hip_pitch, right_knee, right_ankle
     this.defaultAngles = new Float32Array([
-      0, 0, -0.4, 0.8, -0.4,
-      0, 0, -0.4, 0.8, -0.4,
+      0, 0, -0.1, 0.3, -0.2,
+      0, 0, -0.1, 0.3, -0.2,
     ]);
 
-    // PD gains per joint (matching unitree_rl_gym training config)
+    // PD gains per joint (from unitree_rl_gym h1_config.py)
     this.kp = new Float32Array([
-      150, 150, 200, 200, 40,   // left leg
-      150, 150, 200, 200, 40,   // right leg
+      150, 150, 150, 200, 40,   // left: yaw, roll, pitch, knee, ankle
+      150, 150, 150, 200, 40,   // right
     ]);
     this.kd = new Float32Array([
-      5, 5, 5, 5, 2,   // left leg
-      5, 5, 5, 5, 2,   // right leg
+      2, 2, 2, 4, 2,   // left
+      2, 2, 2, 4, 2,   // right
     ]);
+
+    // Observation scaling (from unitree_rl_gym deploy config)
+    this.obsScales = {
+      angVel: 0.25,
+      dofPos: 1.0,
+      dofVel: 0.05,
+      cmdScale: [2.0, 2.0, 0.25], // [vx, vy, wz]
+    };
 
     // Gait phase (single phase, advances at gait_freq per ctrl step)
     this.phase = 0.0;
@@ -130,8 +141,8 @@ export class H1OnnxController {
     for (let i = 0; i < 10; i++) {
       this.data.qpos[this.jntQpos[i]] = this.defaultAngles[i];
     }
-    // Standing height ~1.06m
-    this.data.qpos[2] = 1.06;
+    // Standing height (from h1_config.py: base_init_state pos z=1.0)
+    this.data.qpos[2] = 1.0;
     for (let i = 0; i < this.model.nv; i++) this.data.qvel[i] = 0;
     this.mujoco.mj_forward(this.model, this.data);
   }
@@ -155,31 +166,34 @@ export class H1OnnxController {
 
   buildObs() {
     const obs = new Float32Array(41);
+    const s = this.obsScales;
 
-    // [0:3] Angular velocity (body frame)
+    // [0:3] Angular velocity (body frame) * ang_vel_scale
     const gyro = this.rotateByInvQuat(this.data.qvel[3], this.data.qvel[4], this.data.qvel[5]);
-    obs[0] = gyro[0]; obs[1] = gyro[1]; obs[2] = gyro[2];
+    obs[0] = gyro[0] * s.angVel;
+    obs[1] = gyro[1] * s.angVel;
+    obs[2] = gyro[2] * s.angVel;
 
-    // [3:6] Projected gravity (body frame)
+    // [3:6] Projected gravity (body frame) — no scaling
     const grav = this.rotateByInvQuat(0, 0, -1);
     obs[3] = grav[0]; obs[4] = grav[1]; obs[5] = grav[2];
 
-    // [6:9] Velocity commands
-    obs[6] = this.forwardSpeed;
-    obs[7] = this.lateralSpeed;
-    obs[8] = this.turnRate;
+    // [6:9] Velocity commands * cmd_scale
+    obs[6] = this.forwardSpeed * s.cmdScale[0];
+    obs[7] = this.lateralSpeed * s.cmdScale[1];
+    obs[8] = this.turnRate * s.cmdScale[2];
 
-    // [9:19] Joint positions - defaults
+    // [9:19] Joint positions - defaults (* dof_pos_scale=1.0)
     for (let i = 0; i < 10; i++) {
-      obs[9 + i] = this.data.qpos[this.jntQpos[i]] - this.defaultAngles[i];
+      obs[9 + i] = (this.data.qpos[this.jntQpos[i]] - this.defaultAngles[i]) * s.dofPos;
     }
 
-    // [19:29] Joint velocities
+    // [19:29] Joint velocities * dof_vel_scale
     for (let i = 0; i < 10; i++) {
-      obs[19 + i] = this.data.qvel[this.jntDof[i]];
+      obs[19 + i] = this.data.qvel[this.jntDof[i]] * s.dofVel;
     }
 
-    // [29:39] Previous actions
+    // [29:39] Previous actions (no scaling)
     for (let i = 0; i < 10; i++) {
       obs[29 + i] = this.lastAction[i];
     }
