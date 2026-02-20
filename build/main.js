@@ -2245,6 +2245,696 @@ ${allActuators}
 </mujoco>`;
 }
 
+// src/evolutionController.js
+var QUADRUPED_GENES = [
+  { name: "frequency", min: 1, max: 4, def: 2.5 },
+  { name: "thighAmp", min: 0.05, max: 0.5, def: 0.25 },
+  { name: "calfAmp", min: 0.05, max: 0.5, def: 0.25 },
+  { name: "hipAmp", min: 0.01, max: 0.1, def: 0.04 },
+  { name: "balanceKp", min: 20, max: 120, def: 60 },
+  { name: "balanceKd", min: 1, max: 15, def: 5 },
+  { name: "homeThigh", min: 0.5, max: 1.3, def: 0.9 },
+  { name: "homeCalf", min: -2.2, max: -1.2, def: -1.8 },
+  { name: "hipKp", min: 50, max: 250, def: 120 },
+  { name: "thighKp", min: 80, max: 400, def: 200 },
+  { name: "calfKp", min: 100, max: 500, def: 250 }
+];
+var HUMANOID_GENES = [
+  { name: "frequency", min: 0.5, max: 3, def: 1.2 },
+  { name: "hipPitchAmp", min: 0.05, max: 0.6, def: 0.3 },
+  { name: "kneeBend", min: 0.1, max: 0.8, def: 0.4 },
+  { name: "anklePitchAmp", min: 0.05, max: 0.5, def: 0.2 },
+  { name: "hipRollAmp", min: 0.01, max: 0.15, def: 0.05 },
+  { name: "armSwingAmp", min: 0, max: 0.5, def: 0.2 },
+  { name: "balanceKp", min: 100, max: 800, def: 300 },
+  { name: "balanceKd", min: 5, max: 50, def: 15 },
+  { name: "stanceWidth", min: 0, max: 0.15, def: 0.05 },
+  { name: "leanForward", min: -0.1, max: 0.2, def: 0.05 },
+  { name: "legKp", min: 200, max: 1500, def: 800 }
+];
+function randomGenome(geneDefs) {
+  return geneDefs.map((g) => g.min + Math.random() * (g.max - g.min));
+}
+function defaultGenome(geneDefs) {
+  return geneDefs.map((g) => g.def);
+}
+function crossover(parent1, parent2) {
+  const child = new Float64Array(parent1.length);
+  const crossPoint = Math.floor(Math.random() * parent1.length);
+  for (let i = 0; i < parent1.length; i++) {
+    child[i] = i < crossPoint ? parent1[i] : parent2[i];
+  }
+  return child;
+}
+function mutate(genome, geneDefs, rate = 0.2, strength = 0.15) {
+  const result = new Float64Array(genome);
+  for (let i = 0; i < result.length; i++) {
+    if (Math.random() < rate) {
+      const range = geneDefs[i].max - geneDefs[i].min;
+      result[i] += (Math.random() - 0.5) * 2 * strength * range;
+      result[i] = Math.max(geneDefs[i].min, Math.min(geneDefs[i].max, result[i]));
+    }
+  }
+  return result;
+}
+function tournamentSelect(population, fitnesses, k = 3) {
+  let bestIdx = Math.floor(Math.random() * population.length);
+  for (let i = 1; i < k; i++) {
+    const idx = Math.floor(Math.random() * population.length);
+    if (fitnesses[idx] > fitnesses[bestIdx]) bestIdx = idx;
+  }
+  return population[bestIdx];
+}
+var EvolutionController = class {
+  /**
+   * @param {string} robotType - 'quadruped' or 'humanoid'
+   * @param {number} populationSize - number of robots
+   * @param {number} evalSteps - simulation steps per evaluation (e.g., 2500 = 5s at 500Hz)
+   */
+  constructor(robotType, populationSize, evalSteps = 2500) {
+    this.robotType = robotType;
+    this.geneDefs = robotType === "humanoid" ? HUMANOID_GENES : QUADRUPED_GENES;
+    this.populationSize = populationSize;
+    this.evalSteps = evalSteps;
+    this.generation = 0;
+    this.currentStep = 0;
+    this.bestFitness = -Infinity;
+    this.bestGenome = null;
+    this.bestEverFitness = -Infinity;
+    this.bestEverGenome = null;
+    this.population = [];
+    this.fitnesses = new Float64Array(populationSize);
+    this.startPositions = new Float64Array(populationSize * 3);
+    this.fallen = new Uint8Array(populationSize);
+    this.population.push(defaultGenome(this.geneDefs));
+    for (let i = 1; i < populationSize; i++) {
+      this.population.push(randomGenome(this.geneDefs));
+    }
+    this.history = [];
+    this.enabled = false;
+    this.evaluating = false;
+  }
+  /**
+   * Get a named parameter from a robot's genome.
+   */
+  getParam(robotIdx, paramName) {
+    const idx = this.geneDefs.findIndex((g) => g.name === paramName);
+    if (idx < 0) return 0;
+    return this.population[robotIdx][idx];
+  }
+  /**
+   * Record starting positions at the beginning of an evaluation.
+   */
+  recordStartPositions(robots) {
+    for (let i = 0; i < this.populationSize; i++) {
+      const addr = robots[i].baseQposAddr;
+      const data2 = robots[i].data;
+      this.startPositions[i * 3 + 0] = data2.qpos[addr + 0];
+      this.startPositions[i * 3 + 1] = data2.qpos[addr + 1];
+      this.startPositions[i * 3 + 2] = data2.qpos[addr + 2];
+    }
+    this.fallen.fill(0);
+  }
+  /**
+   * Check if a robot has fallen (base z too low or tilted too much).
+   */
+  checkFallen(robots) {
+    for (let i = 0; i < this.populationSize; i++) {
+      if (this.fallen[i]) continue;
+      const addr = robots[i].baseQposAddr;
+      const data2 = robots[i].data;
+      const z = data2.qpos[addr + 2];
+      const threshold = this.robotType === "humanoid" ? 0.4 : 0.1;
+      if (z < threshold) this.fallen[i] = 1;
+    }
+  }
+  /**
+   * Evaluate fitness for all robots after evaluation period.
+   * Fitness = forward distance + upright bonus - lateral penalty
+   */
+  evaluateFitness(robots) {
+    let bestFit = -Infinity;
+    let bestIdx = 0;
+    for (let i = 0; i < this.populationSize; i++) {
+      const addr = robots[i].baseQposAddr;
+      const data2 = robots[i].data;
+      const startX = this.startPositions[i * 3 + 0];
+      const startY = this.startPositions[i * 3 + 1];
+      const endX = data2.qpos[addr + 0];
+      const endY = data2.qpos[addr + 1];
+      const endZ = data2.qpos[addr + 2];
+      const fwdDist = endX - startX;
+      const latDist = Math.abs(endY - startY);
+      const uprightBonus = this.fallen[i] ? 0 : endZ * 2;
+      let fitness = fwdDist * 10 + uprightBonus - latDist * 2;
+      if (this.fallen[i]) fitness -= 5;
+      this.fitnesses[i] = fitness;
+      if (fitness > bestFit) {
+        bestFit = fitness;
+        bestIdx = i;
+      }
+    }
+    this.bestFitness = bestFit;
+    this.bestGenome = [...this.population[bestIdx]];
+    if (bestFit > this.bestEverFitness) {
+      this.bestEverFitness = bestFit;
+      this.bestEverGenome = [...this.population[bestIdx]];
+    }
+    const avg = this.fitnesses.reduce((a, b) => a + b, 0) / this.populationSize;
+    const worst = Math.min(...this.fitnesses);
+    this.history.push({
+      gen: this.generation,
+      best: bestFit,
+      avg,
+      worst
+    });
+    return { bestFit, bestIdx, avg, worst };
+  }
+  /**
+   * Create next generation using tournament selection, crossover, and mutation.
+   * Elitism: best genome passes unchanged.
+   */
+  evolve() {
+    const newPop = [];
+    if (this.bestEverGenome) {
+      newPop.push([...this.bestEverGenome]);
+    } else {
+      newPop.push([...this.population[0]]);
+    }
+    while (newPop.length < this.populationSize) {
+      const parent1 = tournamentSelect(this.population, this.fitnesses);
+      const parent2 = tournamentSelect(this.population, this.fitnesses);
+      let child = crossover(parent1, parent2);
+      const mutRate = this.generation < 10 ? 0.35 : 0.2;
+      const mutStrength = this.generation < 10 ? 0.2 : 0.12;
+      child = mutate(child, this.geneDefs, mutRate, mutStrength);
+      newPop.push(child);
+    }
+    this.population = newPop;
+    this.generation++;
+    this.currentStep = 0;
+  }
+  /**
+   * Apply genome parameters to a robot's CPG controller.
+   */
+  applyGenome(robot, genomeIdx) {
+    const genome = this.population[genomeIdx];
+    if (this.robotType === "quadruped") {
+      robot.frequency = genome[0];
+      robot.thighAmp = genome[1];
+      robot.calfAmp = genome[2];
+      robot.hipAmp = genome[3];
+      robot.balanceKp = genome[4];
+      robot.balanceKd = genome[5];
+      robot.homeThigh = genome[6];
+      robot.homeCalf = genome[7];
+      robot.hipKp = genome[8];
+      robot.thighKp = genome[9];
+      robot.calfKp = genome[10];
+    } else {
+      robot.frequency = genome[0];
+      robot.hipPitchAmp = genome[1];
+      robot.kneeBend = genome[2];
+      robot.anklePitchAmp = genome[3];
+      robot.hipRollAmp = genome[4];
+      robot.armSwingAmp = genome[5];
+      robot.balanceKp = genome[6];
+      robot.balanceKd = genome[7];
+      robot.stanceWidth = genome[8];
+      robot.leanForward = genome[9];
+      robot.legKp = genome[10];
+    }
+  }
+  /**
+   * Get status text for display.
+   */
+  getStatusText() {
+    const progress = Math.floor(this.currentStep / this.evalSteps * 100);
+    const best = this.bestEverFitness > -Infinity ? this.bestEverFitness.toFixed(1) : "--";
+    return `Gen ${this.generation} | ${progress}% | Best: ${best}`;
+  }
+  /**
+   * Get gene names and values for a specific robot (for debug/display).
+   */
+  getGenomeInfo(robotIdx) {
+    const genome = this.population[robotIdx];
+    return this.geneDefs.map((g, i) => ({
+      name: g.name,
+      value: genome[i],
+      min: g.min,
+      max: g.max
+    }));
+  }
+};
+
+// src/evolutionRunner.js
+var SingleH1CPG = class {
+  constructor(mujoco2, model2, data2, prefix, index) {
+    this.mujoco = mujoco2;
+    this.model = model2;
+    this.data = data2;
+    this.prefix = prefix;
+    this.index = index;
+    this.enabled = false;
+    this.simDt = model2.opt.timestep || 2e-3;
+    this.frequency = 1.2;
+    this.hipPitchAmp = 0.25;
+    this.kneeBend = 0.35;
+    this.anklePitchAmp = 0.15;
+    this.hipRollAmp = 0.03;
+    this.armSwingAmp = 0.3;
+    this.balanceKp = 300;
+    this.balanceKd = 20;
+    this.stanceWidth = 0.05;
+    this.leanForward = 0.05;
+    this.legKp = 800;
+    this.phase = 0;
+    this.prevPitch = 0;
+    this.prevRoll = 0;
+    this.homeQpos = {
+      left_hip_yaw: 0,
+      left_hip_roll: 0,
+      left_hip_pitch: -0.4,
+      left_knee: 0.8,
+      left_ankle: -0.4,
+      right_hip_yaw: 0,
+      right_hip_roll: 0,
+      right_hip_pitch: -0.4,
+      right_knee: 0.8,
+      right_ankle: -0.4,
+      torso: 0,
+      left_shoulder_pitch: 0,
+      left_shoulder_roll: 0.2,
+      left_shoulder_yaw: 0,
+      left_elbow: -0.3,
+      right_shoulder_pitch: 0,
+      right_shoulder_roll: -0.2,
+      right_shoulder_yaw: 0,
+      right_elbow: -0.3
+    };
+    this.actBase = index * 19;
+    this.numAct = 19;
+    this.actOff = {
+      left_hip_yaw: 0,
+      left_hip_roll: 1,
+      left_hip_pitch: 2,
+      left_knee: 3,
+      left_ankle: 4,
+      right_hip_yaw: 5,
+      right_hip_roll: 6,
+      right_hip_pitch: 7,
+      right_knee: 8,
+      right_ankle: 9,
+      torso: 10,
+      left_shoulder_pitch: 11,
+      left_shoulder_roll: 12,
+      left_shoulder_yaw: 13,
+      left_elbow: 14,
+      right_shoulder_pitch: 15,
+      right_shoulder_roll: 16,
+      right_shoulder_yaw: 17,
+      right_elbow: 18
+    };
+    this.baseQposAddr = 0;
+    this.jntQpos = {};
+    this.jntDof = {};
+    this.findIndices();
+  }
+  findIndices() {
+    const p = this.prefix;
+    try {
+      const fjId = this.mujoco.mj_name2id(this.model, 3, `${p}freejoint`);
+      if (fjId >= 0) this.baseQposAddr = this.model.jnt_qposadr[fjId];
+    } catch (e) {
+    }
+    for (const name of Object.keys(this.actOff)) {
+      const fullName = `${p}${name}`;
+      try {
+        const jid = this.mujoco.mj_name2id(this.model, 3, fullName);
+        if (jid >= 0) {
+          this.jntQpos[name] = this.model.jnt_qposadr[jid];
+          this.jntDof[name] = this.model.jnt_dofadr[jid];
+        }
+      } catch (e) {
+      }
+    }
+  }
+  getTrunkOrientation() {
+    const a = this.baseQposAddr;
+    const qw = this.data.qpos[a + 3];
+    const qx = this.data.qpos[a + 4];
+    const qy = this.data.qpos[a + 5];
+    const qz = this.data.qpos[a + 6];
+    const sinp = 2 * (qw * qy - qz * qx);
+    const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp) * Math.PI / 2 : Math.asin(sinp);
+    const roll = Math.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy));
+    return { pitch, roll };
+  }
+  pdTorque(jointName, target, kp, kd) {
+    const qIdx = this.jntQpos[jointName];
+    const dIdx = this.jntDof[jointName];
+    if (qIdx === void 0) return 0;
+    const q = this.data.qpos[qIdx];
+    const qdot = this.data.qvel[dIdx] || 0;
+    return kp * (target - q) - kd * qdot;
+  }
+  step() {
+    if (!this.enabled) return;
+    this.phase += 2 * Math.PI * this.frequency * this.simDt;
+    if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
+    const leftPhase = this.phase;
+    const rightPhase = this.phase + Math.PI;
+    const ampScale = 0.8;
+    const direction = 1;
+    const { pitch, roll } = this.getTrunkOrientation();
+    const pitchRate = (pitch - this.prevPitch) / this.simDt;
+    const rollRate = (roll - this.prevRoll) / this.simDt;
+    this.prevPitch = pitch;
+    this.prevRoll = roll;
+    const hipKp = this.legKp;
+    const hipKd = this.legKp * 0.04;
+    const kneeKp = this.legKp * 1.5;
+    const kneeKd = kneeKp * 0.04;
+    const ankleKp = this.legKp * 0.25;
+    const ankleKd = ankleKp * 0.05;
+    const torsoKp = this.legKp * 0.75;
+    const torsoKd = torsoKp * 0.04;
+    const armKp = 50;
+    const armKd = 3;
+    const ctrl = this.data.ctrl;
+    const base = this.actBase;
+    const lSwing = Math.sin(leftPhase);
+    const lStance = Math.max(0, -Math.sin(leftPhase));
+    const lHipPitch = this.homeQpos.left_hip_pitch + this.leanForward + direction * this.hipPitchAmp * ampScale * lSwing;
+    const lKnee = this.homeQpos.left_knee + this.kneeBend * ampScale * Math.max(0, Math.sin(leftPhase));
+    const lAnkle = this.homeQpos.left_ankle - this.anklePitchAmp * ampScale * lSwing;
+    const lHipRoll = this.homeQpos.left_hip_roll - this.stanceWidth - this.hipRollAmp * lStance;
+    const lHipYaw = this.homeQpos.left_hip_yaw;
+    ctrl[base + this.actOff.left_hip_yaw] = this.pdTorque("left_hip_yaw", lHipYaw, hipKp, hipKd);
+    ctrl[base + this.actOff.left_hip_roll] = this.pdTorque("left_hip_roll", lHipRoll, hipKp, hipKd);
+    ctrl[base + this.actOff.left_hip_pitch] = this.pdTorque("left_hip_pitch", lHipPitch, hipKp, hipKd);
+    ctrl[base + this.actOff.left_knee] = this.pdTorque("left_knee", lKnee, kneeKp, kneeKd);
+    ctrl[base + this.actOff.left_ankle] = this.pdTorque("left_ankle", lAnkle, ankleKp, ankleKd);
+    const rSwing = Math.sin(rightPhase);
+    const rStance = Math.max(0, -Math.sin(rightPhase));
+    const rHipPitch = this.homeQpos.right_hip_pitch + this.leanForward + direction * this.hipPitchAmp * ampScale * rSwing;
+    const rKnee = this.homeQpos.right_knee + this.kneeBend * ampScale * Math.max(0, Math.sin(rightPhase));
+    const rAnkle = this.homeQpos.right_ankle - this.anklePitchAmp * ampScale * rSwing;
+    const rHipRoll = this.homeQpos.right_hip_roll + this.stanceWidth + this.hipRollAmp * rStance;
+    const rHipYaw = this.homeQpos.right_hip_yaw;
+    ctrl[base + this.actOff.right_hip_yaw] = this.pdTorque("right_hip_yaw", rHipYaw, hipKp, hipKd);
+    ctrl[base + this.actOff.right_hip_roll] = this.pdTorque("right_hip_roll", rHipRoll, hipKp, hipKd);
+    ctrl[base + this.actOff.right_hip_pitch] = this.pdTorque("right_hip_pitch", rHipPitch, hipKp, hipKd);
+    ctrl[base + this.actOff.right_knee] = this.pdTorque("right_knee", rKnee, kneeKp, kneeKd);
+    ctrl[base + this.actOff.right_ankle] = this.pdTorque("right_ankle", rAnkle, ankleKp, ankleKd);
+    ctrl[base + this.actOff.torso] = this.pdTorque("torso", 0, torsoKp, torsoKd);
+    const pitchCorr = -this.balanceKp * pitch - this.balanceKd * pitchRate;
+    const rollCorr = -this.balanceKp * roll - this.balanceKd * rollRate;
+    ctrl[base + this.actOff.left_ankle] += pitchCorr * 0.4;
+    ctrl[base + this.actOff.right_ankle] += pitchCorr * 0.4;
+    ctrl[base + this.actOff.left_hip_pitch] += pitchCorr * 0.5;
+    ctrl[base + this.actOff.right_hip_pitch] += pitchCorr * 0.5;
+    ctrl[base + this.actOff.left_hip_roll] += rollCorr * 0.3;
+    ctrl[base + this.actOff.right_hip_roll] -= rollCorr * 0.3;
+    const lArmSwing = -this.armSwingAmp * direction * ampScale * lSwing;
+    const rArmSwing = -this.armSwingAmp * direction * ampScale * rSwing;
+    ctrl[base + this.actOff.left_shoulder_pitch] = this.pdTorque(
+      "left_shoulder_pitch",
+      this.homeQpos.left_shoulder_pitch + lArmSwing,
+      armKp,
+      armKd
+    );
+    ctrl[base + this.actOff.left_shoulder_roll] = this.pdTorque(
+      "left_shoulder_roll",
+      this.homeQpos.left_shoulder_roll,
+      armKp,
+      armKd
+    );
+    ctrl[base + this.actOff.left_shoulder_yaw] = this.pdTorque(
+      "left_shoulder_yaw",
+      this.homeQpos.left_shoulder_yaw,
+      armKp * 0.5,
+      armKd
+    );
+    ctrl[base + this.actOff.left_elbow] = this.pdTorque(
+      "left_elbow",
+      this.homeQpos.left_elbow,
+      armKp,
+      armKd
+    );
+    ctrl[base + this.actOff.right_shoulder_pitch] = this.pdTorque(
+      "right_shoulder_pitch",
+      this.homeQpos.right_shoulder_pitch + rArmSwing,
+      armKp,
+      armKd
+    );
+    ctrl[base + this.actOff.right_shoulder_roll] = this.pdTorque(
+      "right_shoulder_roll",
+      this.homeQpos.right_shoulder_roll,
+      armKp,
+      armKd
+    );
+    ctrl[base + this.actOff.right_shoulder_yaw] = this.pdTorque(
+      "right_shoulder_yaw",
+      this.homeQpos.right_shoulder_yaw,
+      armKp * 0.5,
+      armKd
+    );
+    ctrl[base + this.actOff.right_elbow] = this.pdTorque(
+      "right_elbow",
+      this.homeQpos.right_elbow,
+      armKp,
+      armKd
+    );
+    const ctrlRange = this.model.actuator_ctrlrange;
+    if (ctrlRange) {
+      for (let i = 0; i < this.numAct; i++) {
+        const idx = base + i;
+        const lo = ctrlRange[idx * 2];
+        const hi = ctrlRange[idx * 2 + 1];
+        ctrl[idx] = Math.max(lo, Math.min(hi, ctrl[idx]));
+      }
+    }
+  }
+  reset() {
+    this.phase = Math.random() * Math.PI * 2;
+    this.prevPitch = 0;
+    this.prevRoll = 0;
+  }
+};
+var EvolutionRunner = class {
+  /**
+   * @param {object} mujoco
+   * @param {object} model
+   * @param {object} data
+   * @param {number} numRobots - population size
+   * @param {number} evalSeconds - evaluation time per generation (seconds)
+   */
+  constructor(mujoco2, model2, data2, numRobots, evalSeconds = 8) {
+    this.mujoco = mujoco2;
+    this.model = model2;
+    this.data = data2;
+    this.numRobots = numRobots;
+    this.enabled = false;
+    const dt = model2.opt.timestep || 2e-3;
+    this.evalSteps = Math.round(evalSeconds / dt);
+    this.evo = new EvolutionController("humanoid", numRobots, this.evalSteps);
+    this.robots = [];
+    for (let i = 0; i < numRobots; i++) {
+      this.robots.push(new SingleH1CPG(mujoco2, model2, data2, `r${i}_`, i));
+    }
+    const centerIdx = Math.floor(numRobots / 2);
+    try {
+      this.centerBodyId = mujoco2.mj_name2id(model2, 1, `r${centerIdx}_pelvis`);
+    } catch (e) {
+      this.centerBodyId = 1;
+    }
+    this.evaluating = false;
+    this.stepCount = 0;
+    this.applyGenomes();
+    this.startEvaluation();
+  }
+  /**
+   * Apply genome parameters from EvolutionController to each robot's CPG.
+   */
+  applyGenomes() {
+    for (let i = 0; i < this.numRobots; i++) {
+      const r = this.robots[i];
+      r.frequency = this.evo.getParam(i, "frequency");
+      r.hipPitchAmp = this.evo.getParam(i, "hipPitchAmp");
+      r.kneeBend = this.evo.getParam(i, "kneeBend");
+      r.anklePitchAmp = this.evo.getParam(i, "anklePitchAmp");
+      r.hipRollAmp = this.evo.getParam(i, "hipRollAmp");
+      r.armSwingAmp = this.evo.getParam(i, "armSwingAmp");
+      r.balanceKp = this.evo.getParam(i, "balanceKp");
+      r.balanceKd = this.evo.getParam(i, "balanceKd");
+      r.stanceWidth = this.evo.getParam(i, "stanceWidth");
+      r.leanForward = this.evo.getParam(i, "leanForward");
+      r.legKp = this.evo.getParam(i, "legKp");
+    }
+  }
+  /**
+   * Record start positions and begin a new evaluation period.
+   */
+  startEvaluation() {
+    this.evo.recordStartPositions(this.robots);
+    this.stepCount = 0;
+    this.evaluating = true;
+    for (const r of this.robots) {
+      r.enabled = true;
+    }
+  }
+  /**
+   * Reset all robots to home pose at grid positions.
+   */
+  resetRobots() {
+    if (this.model.nkey > 0) {
+      this.data.qpos.set(this.model.key_qpos.slice(0, this.model.nq));
+      for (let i = 0; i < this.model.nv; i++) this.data.qvel[i] = 0;
+      for (let i = 0; i < this.model.nu; i++) this.data.ctrl[i] = 0;
+      this.mujoco.mj_forward(this.model, this.data);
+    }
+    for (const r of this.robots) {
+      r.reset();
+    }
+    for (const r of this.robots) r.enabled = true;
+    for (let i = 0; i < 200; i++) {
+      for (const r of this.robots) r.step();
+      this.mujoco.mj_step(this.model, this.data);
+    }
+  }
+  /**
+   * Step the evolution. Called every physics step.
+   */
+  step() {
+    if (!this.enabled || !this.evaluating) return;
+    for (const r of this.robots) r.step();
+    this.stepCount++;
+    this.evo.currentStep = this.stepCount;
+    this.evo.checkFallen(this.robots);
+    if (this.stepCount >= this.evalSteps) {
+      this.evaluating = false;
+      const result = this.evo.evaluateFitness(this.robots);
+      console.log(
+        `Gen ${this.evo.generation}: best=${result.bestFit.toFixed(1)}, avg=${result.avg.toFixed(1)}, worst=${result.worst.toFixed(1)}`
+      );
+      this.evo.evolve();
+      this.resetRobots();
+      this.applyGenomes();
+      this.startEvaluation();
+    }
+  }
+  /**
+   * Get status text for display.
+   */
+  getStatusText() {
+    return this.evo.getStatusText();
+  }
+  /**
+   * Get history for charting.
+   */
+  getHistory() {
+    return this.evo.history;
+  }
+  setCommand() {
+  }
+  reset() {
+    this.resetRobots();
+    this.applyGenomes();
+    this.startEvaluation();
+  }
+};
+
+// src/evolutionScene.js
+function prefixAllNames(xml, p) {
+  xml = xml.replace(/\bname="([^"]+)"/g, `name="${p}$1"`);
+  xml = xml.replace(/\bjoint="([^"]+)"/g, `joint="${p}$1"`);
+  xml = xml.replace(/\btarget="([^"]+)"/g, `target="${p}$1"`);
+  xml = xml.replace(/\bbody1="([^"]+)"/g, `body1="${p}$1"`);
+  xml = xml.replace(/\bbody2="([^"]+)"/g, `body2="${p}$1"`);
+  xml = xml.replace("<freejoint/>", `<freejoint name="${p}freejoint"/>`);
+  return xml;
+}
+function generateH1EvolutionXML(mujoco2, numRobots, spacing) {
+  const h1Xml = new TextDecoder().decode(
+    mujoco2.FS.readFile("/working/unitree_h1/h1.xml")
+  );
+  const defaultStart = h1Xml.indexOf("<default>");
+  const defaultEnd = h1Xml.lastIndexOf("</default>") + "</default>".length;
+  const defaultSection = h1Xml.substring(defaultStart, defaultEnd);
+  const assetStart = h1Xml.indexOf("<asset>") + "<asset>".length;
+  const assetEnd = h1Xml.indexOf("</asset>");
+  const assetContent = h1Xml.substring(assetStart, assetEnd);
+  const wbStart = h1Xml.indexOf("<worldbody>") + "<worldbody>".length;
+  const wbEnd = h1Xml.indexOf("</worldbody>");
+  let robotBodyXml = h1Xml.substring(wbStart, wbEnd).trim();
+  robotBodyXml = robotBodyXml.replace(/<light[^>]*\/>/g, "");
+  const actStart = h1Xml.indexOf("<actuator>") + "<actuator>".length;
+  const actEnd = h1Xml.indexOf("</actuator>");
+  const robotActXml = h1Xml.substring(actStart, actEnd).trim();
+  let contactXml = "";
+  const contactStart = h1Xml.indexOf("<contact>");
+  const contactEnd = h1Xml.indexOf("</contact>");
+  const contactContent = contactStart >= 0 ? h1Xml.substring(contactStart + "<contact>".length, contactEnd).trim() : "";
+  const cols = Math.ceil(Math.sqrt(numRobots));
+  let allBodies = "";
+  let allActuators = "";
+  let allContacts = "";
+  const qposValues = [];
+  const homeJoints = "0 0 -0.4 0.8 -0.4 0 0 -0.4 0.8 -0.4 0 0 0.2 0 -0.3 0 -0.2 0 -0.3";
+  for (let i = 0; i < numRobots; i++) {
+    const row = Math.floor(i / cols);
+    const col = i % cols;
+    const x = (col - (cols - 1) / 2) * spacing;
+    const y = (row - (cols - 1) / 2) * spacing;
+    const prefix = `r${i}_`;
+    let body = prefixAllNames(robotBodyXml, prefix);
+    body = body.replace(
+      /(<body\s+name="r\d+_pelvis"\s+pos=")([^"]+)(")/,
+      `$1${x.toFixed(2)} ${y.toFixed(2)} 1.06$3`
+    );
+    allBodies += body + "\n";
+    allActuators += prefixAllNames(robotActXml, prefix) + "\n";
+    if (contactContent) {
+      allContacts += prefixAllNames(contactContent, prefix) + "\n";
+    }
+    qposValues.push(`${x.toFixed(2)} ${y.toFixed(2)} 1.06 1 0 0 0 ${homeJoints}`);
+  }
+  return `<mujoco model="h1 evolution">
+  <compiler angle="radian" meshdir="assets" autolimits="true"/>
+  <option cone="elliptic" impratio="100"/>
+  <statistic meansize="0.05"/>
+
+  ${defaultSection}
+
+  <asset>
+    ${assetContent}
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+      markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 3" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+${allBodies}
+  </worldbody>
+
+  <contact>
+${allContacts}
+  </contact>
+
+  <actuator>
+${allActuators}
+  </actuator>
+
+  <keyframe>
+    <key name="home" qpos="${qposValues.join(" ")}"/>
+  </keyframe>
+</mujoco>`;
+}
+
 // src/main.js
 var statusEl = document.getElementById("status");
 var sceneSelect = document.getElementById("scene-select");
@@ -2285,7 +2975,7 @@ var b2Controller = null;
 var g1Controller = null;
 var h1_2Controller = null;
 var factoryController = null;
-var evolutionController = null;
+var evolveRunner = null;
 var paused = false;
 var cameraFollow = true;
 var simSpeed = 1;
@@ -2350,6 +3040,13 @@ var SCENES = {
     numRobots: 9,
     spacing: 1.5,
     camera: { pos: [4, 3, 4], target: [0, 0.25, 0] }
+  },
+  "unitree_h1/scene_evolve": {
+    controller: "evolve",
+    numRobots: 9,
+    spacing: 3,
+    evalSeconds: 8,
+    camera: { pos: [6, 5, 6], target: [0, 0.9, 0] }
   }
 };
 var currentScenePath = "unitree_go2/scene.xml";
@@ -2449,7 +3146,13 @@ async function loadScene(sceneKey) {
   setStatus(`Loading: ${sceneKey}`);
   const cfg = SCENES[sceneKey] || {};
   let loadPath;
-  if (cfg.controller === "factory") {
+  if (cfg.controller === "evolve") {
+    await loadSceneAssets(mujoco, "unitree_h1/scene.xml", setStatus);
+    setStatus("Generating evolution arena...");
+    const evoXml = generateH1EvolutionXML(mujoco, cfg.numRobots, cfg.spacing);
+    mujoco.FS.writeFile("/working/unitree_h1/scene_evolve.xml", evoXml);
+    loadPath = "/working/unitree_h1/scene_evolve.xml";
+  } else if (cfg.controller === "factory") {
     await loadSceneAssets(mujoco, "unitree_go2/scene.xml", setStatus);
     setStatus("Generating factory...");
     const factoryXml = generateFactoryXML(mujoco, cfg.numRobots, cfg.spacing);
@@ -2495,10 +3198,14 @@ async function loadScene(sceneKey) {
   g1Controller = null;
   h1_2Controller = null;
   factoryController = null;
-  evolutionController = null;
+  evolveRunner = null;
   stepCounter = 0;
   model.opt.iterations = 30;
-  if (cfg.controller === "go2") {
+  if (cfg.controller === "evolve") {
+    evolveRunner = new EvolutionRunner(mujoco, model, data, cfg.numRobots, cfg.evalSeconds);
+    evolveRunner.enabled = true;
+    activeController = "evolve";
+  } else if (cfg.controller === "go2") {
     go2Controller = new Go2CpgController(mujoco, model, data);
     go2Controller.enabled = true;
     for (let i = 0; i < 200; i++) {
@@ -2576,7 +3283,7 @@ async function loadScene(sceneKey) {
     }
     activeController = "factory";
   }
-  if (cfg.controller !== "factory") findObstacleIndices();
+  if (cfg.controller !== "factory" && cfg.controller !== "evolve") findObstacleIndices();
   nextBall = 0;
   nextBox = 0;
   updateControllerBtn();
@@ -2599,7 +3306,8 @@ function updateControllerBtn() {
     b2: () => b2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
     g1: () => g1Controller?.enabled ? "CPG: ON" : "CPG: OFF",
     h1_2: () => h1_2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
-    factory: () => factoryController?.enabled ? `CPG: ON (${factoryController.numRobots}x)` : "CPG: OFF"
+    factory: () => factoryController?.enabled ? `CPG: ON (${factoryController.numRobots}x)` : "CPG: OFF",
+    evolve: () => evolveRunner?.enabled ? `EVO: ${evolveRunner.getStatusText()}` : "EVO: OFF"
   };
   const fn = labels[activeController];
   if (fn) {
@@ -2620,6 +3328,10 @@ function resetScene() {
   stepCounter = 0;
   nextBall = 0;
   nextBox = 0;
+  if (evolveRunner) {
+    evolveRunner.reset();
+    evolveRunner.enabled = true;
+  }
   if (go2Controller) {
     go2Controller.reset();
     go2Controller.enabled = true;
@@ -2700,6 +3412,8 @@ function toggleController() {
     h1_2Controller.enabled = !h1_2Controller.enabled;
   } else if (activeController === "factory" && factoryController) {
     factoryController.enabled = !factoryController.enabled;
+  } else if (activeController === "evolve" && evolveRunner) {
+    evolveRunner.enabled = !evolveRunner.enabled;
   }
   updateControllerBtn();
 }
@@ -2752,6 +3466,8 @@ function getActiveCtrl() {
       return h1_2Controller;
     case "factory":
       return factoryController;
+    case "evolve":
+      return evolveRunner;
     default:
       return null;
   }
@@ -2815,7 +3531,9 @@ function updateBodies() {
 }
 function followCamera() {
   if (!cameraFollow || !model || !data) return;
-  const rootBody = activeController === "factory" && factoryController ? factoryController.centerBodyId : 1;
+  let rootBody = 1;
+  if (activeController === "factory" && factoryController) rootBody = factoryController.centerBodyId;
+  if (activeController === "evolve" && evolveRunner) rootBody = evolveRunner.centerBodyId;
   const x = data.xpos[rootBody * 3 + 0];
   const y = data.xpos[rootBody * 3 + 1];
   const z = data.xpos[rootBody * 3 + 2];
@@ -2939,6 +3657,9 @@ function setupControls() {
         stepController();
         mujoco.mj_step(model, data);
         stepCounter++;
+      }
+      if (activeController === "evolve" && evolveRunner && stepCounter % 50 === 0) {
+        updateControllerBtn();
       }
       updateBodies();
       followCamera();

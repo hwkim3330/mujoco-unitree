@@ -17,7 +17,8 @@ import { G1CpgController } from './g1CpgController.js';
 import { H1_2CpgController } from './h1_2CpgController.js';
 import { FactoryController } from './factoryController.js';
 import { generateFactoryXML } from './factoryScene.js';
-import { EvolutionController } from './evolutionController.js';
+import { EvolutionRunner } from './evolutionRunner.js';
+import { generateH1EvolutionXML } from './evolutionScene.js';
 
 // ─── DOM ────────────────────────────────────────────────────────────
 const statusEl = document.getElementById('status');
@@ -66,7 +67,7 @@ let b2Controller = null;
 let g1Controller = null;
 let h1_2Controller = null;
 let factoryController = null;
-let evolutionController = null;
+let evolveRunner = null;
 
 let paused = false;
 let cameraFollow = true;
@@ -143,6 +144,13 @@ const SCENES = {
     numRobots: 9,
     spacing: 1.5,
     camera: { pos: [4, 3, 4], target: [0, 0.25, 0] },
+  },
+  'unitree_h1/scene_evolve': {
+    controller: 'evolve',
+    numRobots: 9,
+    spacing: 3.0,
+    evalSeconds: 8,
+    camera: { pos: [6, 5, 6], target: [0, 0.9, 0] },
   },
 };
 
@@ -259,7 +267,14 @@ async function loadScene(sceneKey) {
   const cfg = SCENES[sceneKey] || {};
   let loadPath;
 
-  if (cfg.controller === 'factory') {
+  if (cfg.controller === 'evolve') {
+    // Evolution mode: load H1 assets, then generate multi-robot XML
+    await loadSceneAssets(mujoco, 'unitree_h1/scene.xml', setStatus);
+    setStatus('Generating evolution arena...');
+    const evoXml = generateH1EvolutionXML(mujoco, cfg.numRobots, cfg.spacing);
+    mujoco.FS.writeFile('/working/unitree_h1/scene_evolve.xml', evoXml);
+    loadPath = '/working/unitree_h1/scene_evolve.xml';
+  } else if (cfg.controller === 'factory') {
     // Factory mode: load Go2 assets, then generate multi-robot XML
     await loadSceneAssets(mujoco, 'unitree_go2/scene.xml', setStatus);
     setStatus('Generating factory...');
@@ -310,12 +325,16 @@ async function loadScene(sceneKey) {
   g1Controller = null;
   h1_2Controller = null;
   factoryController = null;
-  evolutionController = null;
+  evolveRunner = null;
   stepCounter = 0;
 
   model.opt.iterations = 30;
 
-  if (cfg.controller === 'go2') {
+  if (cfg.controller === 'evolve') {
+    evolveRunner = new EvolutionRunner(mujoco, model, data, cfg.numRobots, cfg.evalSeconds);
+    evolveRunner.enabled = true;
+    activeController = 'evolve';
+  } else if (cfg.controller === 'go2') {
     go2Controller = new Go2CpgController(mujoco, model, data);
     go2Controller.enabled = true;
     for (let i = 0; i < 200; i++) {
@@ -397,7 +416,7 @@ async function loadScene(sceneKey) {
     activeController = 'factory';
   }
 
-  if (cfg.controller !== 'factory') findObstacleIndices();
+  if (cfg.controller !== 'factory' && cfg.controller !== 'evolve') findObstacleIndices();
   nextBall = 0;
   nextBox = 0;
   updateControllerBtn();
@@ -426,6 +445,7 @@ function updateControllerBtn() {
     g1: () => g1Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
     h1_2: () => h1_2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
     factory: () => factoryController?.enabled ? `CPG: ON (${factoryController.numRobots}x)` : 'CPG: OFF',
+    evolve: () => evolveRunner?.enabled ? `EVO: ${evolveRunner.getStatusText()}` : 'EVO: OFF',
   };
   const fn = labels[activeController];
   if (fn) {
@@ -450,6 +470,10 @@ function resetScene() {
   nextBall = 0;
   nextBox = 0;
 
+  if (evolveRunner) {
+    evolveRunner.reset();
+    evolveRunner.enabled = true;
+  }
   if (go2Controller) {
     go2Controller.reset();
     go2Controller.enabled = true;
@@ -531,6 +555,8 @@ function toggleController() {
     h1_2Controller.enabled = !h1_2Controller.enabled;
   } else if (activeController === 'factory' && factoryController) {
     factoryController.enabled = !factoryController.enabled;
+  } else if (activeController === 'evolve' && evolveRunner) {
+    evolveRunner.enabled = !evolveRunner.enabled;
   }
   updateControllerBtn();
 }
@@ -588,6 +614,7 @@ function getActiveCtrl() {
     case 'g1': return g1Controller;
     case 'h1_2': return h1_2Controller;
     case 'factory': return factoryController;
+    case 'evolve': return evolveRunner;
     default: return null;
   }
 }
@@ -648,8 +675,9 @@ function updateBodies() {
 
 function followCamera() {
   if (!cameraFollow || !model || !data) return;
-  const rootBody = (activeController === 'factory' && factoryController)
-    ? factoryController.centerBodyId : 1;
+  let rootBody = 1;
+  if (activeController === 'factory' && factoryController) rootBody = factoryController.centerBodyId;
+  if (activeController === 'evolve' && evolveRunner) rootBody = evolveRunner.centerBodyId;
   const x = data.xpos[rootBody * 3 + 0];
   const y = data.xpos[rootBody * 3 + 1];
   const z = data.xpos[rootBody * 3 + 2];
@@ -771,6 +799,11 @@ function setupControls() {
         stepController();
         mujoco.mj_step(model, data);
         stepCounter++;
+      }
+
+      // Update evolution status display
+      if (activeController === 'evolve' && evolveRunner && stepCounter % 50 === 0) {
+        updateControllerBtn();
       }
 
       updateBodies();
