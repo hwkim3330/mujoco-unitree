@@ -147,6 +147,16 @@ export class Go2CpgController {
     this.footGeomIds = {};
     this.floorBodyId = -1;
     this.findFootGeoms();
+
+    // ── QWOP manual mode ─────────────────────────────────────────────
+    // Key map: left hand = front legs, right hand = rear legs
+    //   Q/A = FL thigh/calf,  W/S = FR thigh/calf
+    //   I/K = RL thigh/calf,  O/L = RR thigh/calf
+    // Hold key = swing joint away from home, release = spring back
+    this.qwopMode = false;
+    this.qwopKeys = {};  // set externally from main.js key state
+    this.qwopThighDelta = 0.6;  // rad displacement per key press
+    this.qwopCalfDelta = 0.8;
   }
 
   findJointIndices() {
@@ -404,11 +414,59 @@ export class Go2CpgController {
     }
   }
 
+  // ── QWOP manual step ────────────────────────────────────────────────
+  // Key mapping:
+  //   Q = FL thigh fwd    W = FR thigh fwd
+  //   A = FL calf extend   S = FR calf extend
+  //   I = RL thigh fwd    O = RR thigh fwd
+  //   K = RL calf extend   L = RR calf extend
+  //   Z = all hips left    X = all hips right
+  _stepQwop() {
+    const k = this.qwopKeys;
+    const td = this.qwopThighDelta;
+    const cd = this.qwopCalfDelta;
+
+    const targets = {
+      FL: [
+        this.homeHip + (k['KeyZ'] ? 0.3 : 0) + (k['KeyX'] ? -0.3 : 0),
+        this.homeThigh - (k['KeyQ'] ? td : 0),
+        this.homeCalf + (k['KeyA'] ? cd : 0),
+      ],
+      FR: [
+        this.homeHip + (k['KeyZ'] ? 0.3 : 0) + (k['KeyX'] ? -0.3 : 0),
+        this.homeThigh - (k['KeyW'] ? td : 0),
+        this.homeCalf + (k['KeyS'] ? cd : 0),
+      ],
+      RL: [
+        this.homeHip + (k['KeyZ'] ? 0.3 : 0) + (k['KeyX'] ? -0.3 : 0),
+        this.homeThigh - (k['KeyI'] ? td : 0),
+        this.homeCalf + (k['KeyK'] ? cd : 0),
+      ],
+      RR: [
+        this.homeHip + (k['KeyZ'] ? 0.3 : 0) + (k['KeyX'] ? -0.3 : 0),
+        this.homeThigh - (k['KeyO'] ? td : 0),
+        this.homeCalf + (k['KeyL'] ? cd : 0),
+      ],
+    };
+
+    const ctrl = this.data.ctrl;
+    for (const [name, leg] of Object.entries(this.legs)) {
+      const t = targets[name];
+      ctrl[leg.act[0]] = this.pdTorque(`${leg.prefix}_hip_joint`, t[0], this.hipKp, this.hipKd);
+      ctrl[leg.act[1]] = this.pdTorque(`${leg.prefix}_thigh_joint`, t[1], this.thighKp, this.thighKd);
+      ctrl[leg.act[2]] = this.pdTorque(`${leg.prefix}_calf_joint`, t[2], this.calfKp, this.calfKd);
+    }
+
+    this._clampCtrl();
+  }
+
   // ── Main step ──────────────────────────────────────────────────────
   step() {
     if (!this.enabled) return;
 
-    if (this.trickPhase !== IDLE) {
+    if (this.qwopMode) {
+      this._stepQwop();
+    } else if (this.trickPhase !== IDLE) {
       this._stepTrick();
     } else {
       this._stepWalk();

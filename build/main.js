@@ -28755,6 +28755,10 @@ var Go2CpgController = class {
     this.footGeomIds = {};
     this.floorBodyId = -1;
     this.findFootGeoms();
+    this.qwopMode = false;
+    this.qwopKeys = {};
+    this.qwopThighDelta = 0.6;
+    this.qwopCalfDelta = 0.8;
   }
   findJointIndices() {
     const jointNames = [
@@ -28985,10 +28989,54 @@ var Go2CpgController = class {
       }
     }
   }
+  // ── QWOP manual step ────────────────────────────────────────────────
+  // Key mapping:
+  //   Q = FL thigh fwd    W = FR thigh fwd
+  //   A = FL calf extend   S = FR calf extend
+  //   I = RL thigh fwd    O = RR thigh fwd
+  //   K = RL calf extend   L = RR calf extend
+  //   Z = all hips left    X = all hips right
+  _stepQwop() {
+    const k = this.qwopKeys;
+    const td = this.qwopThighDelta;
+    const cd = this.qwopCalfDelta;
+    const targets = {
+      FL: [
+        this.homeHip + (k["KeyZ"] ? 0.3 : 0) + (k["KeyX"] ? -0.3 : 0),
+        this.homeThigh - (k["KeyQ"] ? td : 0),
+        this.homeCalf + (k["KeyA"] ? cd : 0)
+      ],
+      FR: [
+        this.homeHip + (k["KeyZ"] ? 0.3 : 0) + (k["KeyX"] ? -0.3 : 0),
+        this.homeThigh - (k["KeyW"] ? td : 0),
+        this.homeCalf + (k["KeyS"] ? cd : 0)
+      ],
+      RL: [
+        this.homeHip + (k["KeyZ"] ? 0.3 : 0) + (k["KeyX"] ? -0.3 : 0),
+        this.homeThigh - (k["KeyI"] ? td : 0),
+        this.homeCalf + (k["KeyK"] ? cd : 0)
+      ],
+      RR: [
+        this.homeHip + (k["KeyZ"] ? 0.3 : 0) + (k["KeyX"] ? -0.3 : 0),
+        this.homeThigh - (k["KeyO"] ? td : 0),
+        this.homeCalf + (k["KeyL"] ? cd : 0)
+      ]
+    };
+    const ctrl = this.data.ctrl;
+    for (const [name, leg] of Object.entries(this.legs)) {
+      const t = targets[name];
+      ctrl[leg.act[0]] = this.pdTorque(`${leg.prefix}_hip_joint`, t[0], this.hipKp, this.hipKd);
+      ctrl[leg.act[1]] = this.pdTorque(`${leg.prefix}_thigh_joint`, t[1], this.thighKp, this.thighKd);
+      ctrl[leg.act[2]] = this.pdTorque(`${leg.prefix}_calf_joint`, t[2], this.calfKp, this.calfKd);
+    }
+    this._clampCtrl();
+  }
   // ── Main step ──────────────────────────────────────────────────────
   step() {
     if (!this.enabled) return;
-    if (this.trickPhase !== IDLE) {
+    if (this.qwopMode) {
+      this._stepQwop();
+    } else if (this.trickPhase !== IDLE) {
       this._stepTrick();
     } else {
       this._stepWalk();
@@ -31651,7 +31699,7 @@ async function loadScene(sceneKey) {
 function updateControllerBtn() {
   if (!controllerBtn) return;
   const labels = {
-    go2: () => go2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
+    go2: () => go2Controller?.qwopMode ? "QWOP" : go2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
     go2rl: () => go2RlController?.enabled ? "RL: ON" : "RL: OFF",
     h1: () => h1Controller?.enabled ? "CPG: ON" : "CPG: OFF",
     b2: () => b2Controller?.enabled ? "CPG: ON" : "CPG: OFF",
@@ -31798,8 +31846,9 @@ function handleInput() {
   if (touchRotR) turn = -0.7;
   const ctrl = getActiveCtrl();
   if (ctrl && ctrl.enabled && ctrl.setCommand) {
-    ctrl.setCommand(fwd, lat, turn);
+    if (!ctrl.qwopMode) ctrl.setCommand(fwd, lat, turn);
   }
+  if (ctrl && ctrl.qwopMode) ctrl.qwopKeys = keys;
 }
 function getActiveCtrl() {
   switch (activeController) {
@@ -31835,6 +31884,15 @@ window.addEventListener("keydown", (e) => {
   if (e.code === "KeyC") cameraFollow = !cameraFollow;
   if (e.code === "KeyH" && helpOverlay) {
     helpOverlay.style.display = helpOverlay.style.display === "none" ? "" : "none";
+  }
+  if (e.code === "KeyM") {
+    const c = getActiveCtrl();
+    if (c && "qwopMode" in c) {
+      c.qwopMode = !c.qwopMode;
+      if (c.qwopMode) c._endTrick?.();
+      setStatus(c.qwopMode ? "QWOP Mode! Q/W=front thighs A/S=front calves I/O=rear thighs K/L=rear calves" : "CPG Mode");
+      updateControllerBtn();
+    }
   }
   if (e.code === "KeyF") spawnObstacle(Math.random() < 0.5 ? "ball" : "box");
   if (e.code === "Digit1") {

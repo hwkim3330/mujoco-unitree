@@ -447,7 +447,7 @@ async function loadScene(sceneKey) {
 function updateControllerBtn() {
   if (!controllerBtn) return;
   const labels = {
-    go2: () => go2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
+    go2: () => go2Controller?.qwopMode ? 'QWOP' : go2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
     go2rl: () => go2RlController?.enabled ? 'RL: ON' : 'RL: OFF',
     h1: () => h1Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
     b2: () => b2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF',
@@ -610,8 +610,10 @@ function handleInput() {
   // Send commands to active controller
   const ctrl = getActiveCtrl();
   if (ctrl && ctrl.enabled && ctrl.setCommand) {
-    ctrl.setCommand(fwd, lat, turn);
+    if (!ctrl.qwopMode) ctrl.setCommand(fwd, lat, turn);
   }
+  // Pass raw key state for QWOP mode
+  if (ctrl && ctrl.qwopMode) ctrl.qwopKeys = keys;
 }
 
 function getActiveCtrl() {
@@ -639,6 +641,15 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyC') cameraFollow = !cameraFollow;
   if (e.code === 'KeyH' && helpOverlay) {
     helpOverlay.style.display = helpOverlay.style.display === 'none' ? '' : 'none';
+  }
+  if (e.code === 'KeyM') {
+    const c = getActiveCtrl();
+    if (c && 'qwopMode' in c) {
+      c.qwopMode = !c.qwopMode;
+      if (c.qwopMode) c._endTrick?.();
+      setStatus(c.qwopMode ? 'QWOP Mode! Q/W=front thighs A/S=front calves I/O=rear thighs K/L=rear calves' : 'CPG Mode');
+      updateControllerBtn();
+    }
   }
   if (e.code === 'KeyF') spawnObstacle(Math.random() < 0.5 ? 'ball' : 'box');
   // Trick keys (Go2 CPG only)
