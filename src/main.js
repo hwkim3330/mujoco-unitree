@@ -249,7 +249,7 @@ async function loadScene(scenePath) {
   } else if (cfg.controller === 'h1') {
     h1Controller = new H1CpgController(mujoco, model, data);
     h1Controller.enabled = true; // Enable BEFORE warm-up so PD holds the robot upright
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 500; i++) {
       h1Controller.step();
       mujoco.mj_step(model, data);
     }
@@ -309,7 +309,7 @@ function resetScene() {
   if (h1Controller) {
     h1Controller.reset();
     h1Controller.enabled = true;
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 500; i++) {
       h1Controller.step();
       mujoco.mj_step(model, data);
     }

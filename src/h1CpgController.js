@@ -44,8 +44,8 @@ export class H1CpgController {
     this.armSwingGain = 0.3;
 
     // PD gains for balance (applied as torque corrections)
-    this.balanceKp = 50.0;       // Proportional gain for trunk lean correction
-    this.balanceKd = 5.0;        // Derivative gain
+    this.balanceKp = 300.0;
+    this.balanceKd = 20.0;
 
     // Home pose (joint targets at stance)
     this.homeQpos = {
@@ -165,12 +165,13 @@ export class H1CpgController {
     this.prevPitch = pitch;
     this.prevRoll = roll;
 
-    // PD gains for each joint type
-    const hipKp = 150, hipKd = 8;
-    const kneeKp = 200, kneeKd = 10;
-    const ankleKp = 30, ankleKd = 2;
-    const torsoKp = 150, torsoKd = 10;
-    const armKp = 20, armKd = 2;
+    // PD gains — must be high enough to resist gravity on 47kg robot
+    // Knee gravity torque ~120 Nm, hip ~60 Nm
+    const hipKp = 800, hipKd = 30;
+    const kneeKp = 1200, kneeKd = 40;
+    const ankleKp = 200, ankleKd = 10;
+    const torsoKp = 600, torsoKd = 25;
+    const armKp = 50, armKd = 3;
 
     const ctrl = this.data.ctrl;
 
@@ -224,15 +225,20 @@ export class H1CpgController {
     ctrl[this.actIdx.torso] = this.pdTorque('torso', torsoTarget, torsoKp, torsoKd);
 
     // --- BALANCE CORRECTIONS ---
-    // Add pitch correction to hip pitch (lean forward/back → adjust hip)
     const pitchCorrection = -this.balanceKp * pitch - this.balanceKd * pitchRate;
-    ctrl[this.actIdx.left_hip_pitch] += pitchCorrection * 0.3;
-    ctrl[this.actIdx.right_hip_pitch] += pitchCorrection * 0.3;
-
-    // Add roll correction to hip roll
     const rollCorrection = -this.balanceKp * roll - this.balanceKd * rollRate;
-    ctrl[this.actIdx.left_hip_roll] += rollCorrection * 0.2;
-    ctrl[this.actIdx.right_hip_roll] -= rollCorrection * 0.2;
+
+    // Ankle strategy (primary): ankle torque shifts center of pressure
+    ctrl[this.actIdx.left_ankle] += pitchCorrection * 0.4;
+    ctrl[this.actIdx.right_ankle] += pitchCorrection * 0.4;
+
+    // Hip strategy (secondary): hip torque for larger perturbations
+    ctrl[this.actIdx.left_hip_pitch] += pitchCorrection * 0.5;
+    ctrl[this.actIdx.right_hip_pitch] += pitchCorrection * 0.5;
+
+    // Roll corrections via hip roll
+    ctrl[this.actIdx.left_hip_roll] += rollCorrection * 0.3;
+    ctrl[this.actIdx.right_hip_roll] -= rollCorrection * 0.3;
 
     // --- ARMS (opposite to legs) ---
     const leftArmSwing = -this.armSwingGain * direction * ampScale * leftSwing;

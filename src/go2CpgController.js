@@ -30,14 +30,14 @@ export class Go2CpgController {
     this.calfAmp = 0.25;         // Knee bend during swing
     this.hipAmp = 0.04;          // Abduction for lateral balance
 
-    // PD gains
-    this.hipKp = 60;   this.hipKd = 2;
-    this.thighKp = 80; this.thighKd = 3;
-    this.calfKp = 100;  this.calfKd = 4;
+    // PD gains — Go2 is ~7kg, needs moderate gains
+    this.hipKp = 120;  this.hipKd = 4;
+    this.thighKp = 200; this.thighKd = 6;
+    this.calfKp = 250;  this.calfKd = 8;
 
     // Balance feedback
-    this.balanceKp = 30;
-    this.balanceKd = 3;
+    this.balanceKp = 60;
+    this.balanceKd = 5;
 
     // Home pose
     this.homeHip = 0;

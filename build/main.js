@@ -28386,14 +28386,14 @@ var Go2CpgController = class {
     this.thighAmp = 0.25;
     this.calfAmp = 0.25;
     this.hipAmp = 0.04;
-    this.hipKp = 60;
-    this.hipKd = 2;
-    this.thighKp = 80;
-    this.thighKd = 3;
-    this.calfKp = 100;
-    this.calfKd = 4;
-    this.balanceKp = 30;
-    this.balanceKd = 3;
+    this.hipKp = 120;
+    this.hipKd = 4;
+    this.thighKp = 200;
+    this.thighKd = 6;
+    this.calfKp = 250;
+    this.calfKd = 8;
+    this.balanceKp = 60;
+    this.balanceKd = 5;
     this.homeHip = 0;
     this.homeThigh = 0.9;
     this.homeCalf = -1.8;
@@ -28526,8 +28526,8 @@ var H1CpgController = class {
     this.ankleAmp = 0.15;
     this.hipRollAmp = 0.03;
     this.armSwingGain = 0.3;
-    this.balanceKp = 50;
-    this.balanceKd = 5;
+    this.balanceKp = 300;
+    this.balanceKd = 20;
     this.homeQpos = {
       left_hip_yaw: 0,
       left_hip_roll: 0,
@@ -28644,11 +28644,11 @@ var H1CpgController = class {
     const rollRate = (roll - this.prevRoll) / this.simDt;
     this.prevPitch = pitch;
     this.prevRoll = roll;
-    const hipKp = 150, hipKd = 8;
-    const kneeKp = 200, kneeKd = 10;
-    const ankleKp = 30, ankleKd = 2;
-    const torsoKp = 150, torsoKd = 10;
-    const armKp = 20, armKd = 2;
+    const hipKp = 800, hipKd = 30;
+    const kneeKp = 1200, kneeKd = 40;
+    const ankleKp = 200, ankleKd = 10;
+    const torsoKp = 600, torsoKd = 25;
+    const armKp = 50, armKd = 3;
     const ctrl = this.data.ctrl;
     const leftSwing = Math.sin(leftPhase);
     const leftStance = Math.max(0, -Math.sin(leftPhase));
@@ -28677,11 +28677,13 @@ var H1CpgController = class {
     const torsoTarget = this.homeQpos.torso + this.turnRate * 0.1;
     ctrl[this.actIdx.torso] = this.pdTorque("torso", torsoTarget, torsoKp, torsoKd);
     const pitchCorrection = -this.balanceKp * pitch - this.balanceKd * pitchRate;
-    ctrl[this.actIdx.left_hip_pitch] += pitchCorrection * 0.3;
-    ctrl[this.actIdx.right_hip_pitch] += pitchCorrection * 0.3;
     const rollCorrection = -this.balanceKp * roll - this.balanceKd * rollRate;
-    ctrl[this.actIdx.left_hip_roll] += rollCorrection * 0.2;
-    ctrl[this.actIdx.right_hip_roll] -= rollCorrection * 0.2;
+    ctrl[this.actIdx.left_ankle] += pitchCorrection * 0.4;
+    ctrl[this.actIdx.right_ankle] += pitchCorrection * 0.4;
+    ctrl[this.actIdx.left_hip_pitch] += pitchCorrection * 0.5;
+    ctrl[this.actIdx.right_hip_pitch] += pitchCorrection * 0.5;
+    ctrl[this.actIdx.left_hip_roll] += rollCorrection * 0.3;
+    ctrl[this.actIdx.right_hip_roll] -= rollCorrection * 0.3;
     const leftArmSwing = -this.armSwingGain * direction * ampScale * leftSwing;
     const rightArmSwing = -this.armSwingGain * direction * ampScale * rightSwing;
     ctrl[this.actIdx.left_shoulder_pitch] = this.pdTorque(
@@ -28945,7 +28947,7 @@ async function loadScene(scenePath) {
   } else if (cfg.controller === "h1") {
     h1Controller = new H1CpgController(mujoco, model, data);
     h1Controller.enabled = true;
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 500; i++) {
       h1Controller.step();
       mujoco.mj_step(model, data);
     }
@@ -28997,7 +28999,7 @@ function resetScene() {
   if (h1Controller) {
     h1Controller.reset();
     h1Controller.enabled = true;
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 500; i++) {
       h1Controller.step();
       mujoco.mj_step(model, data);
     }
