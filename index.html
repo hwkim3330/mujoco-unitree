@@ -68,6 +68,7 @@
         #status { font-size: 10px; min-width: 80px; }
       }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/ort.min.js"></script>
     <script async src="https://unpkg.com/es-module-shims@1.6.3/dist/es-module-shims.js"></script>
     <script type="importmap">
       {
@@ -81,7 +82,8 @@
   <body>
     <div id="ui">
       <select id="scene-select">
-        <option value="unitree_go2/scene.xml">Go2 - Flat</option>
+        <option value="unitree_go2/scene.xml">Go2 - Flat (CPG)</option>
+        <option value="unitree_go2/scene.xml|rl">Go2 - Flat (RL)</option>
         <option value="unitree_go2/scene_stairs.xml">Go2 - Stairs</option>
         <option value="unitree_go2/scene_rough.xml">Go2 - Rough</option>
         <option value="unitree_h1/scene.xml">H1 - Flat</option>

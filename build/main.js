@@ -28520,6 +28520,273 @@ var Go2CpgController = class {
   }
 };
 
+// src/go2OnnxController.js
+var Go2OnnxController = class {
+  constructor(mujoco2, model2, data2) {
+    this.mujoco = mujoco2;
+    this.model = model2;
+    this.data = data2;
+    this.enabled = false;
+    this.session = null;
+    this.simDt = model2.opt.timestep || 2e-3;
+    this.decimation = 10;
+    this.stepCount = 0;
+    this.Kp = 25;
+    this.Kd = 0.5;
+    this.actionScale = 0.25;
+    this.defaultPos = new Float32Array([
+      0,
+      0,
+      0,
+      0,
+      // hips
+      1.1,
+      1.1,
+      1.1,
+      1.1,
+      // thighs
+      -1.8,
+      -1.8,
+      -1.8,
+      -1.8
+      // calfs
+    ]);
+    this.MJ_TO_IL = [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8, 11];
+    this.IL_TO_MJ = [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8, 11];
+    this.lastAction = new Float32Array(12);
+    this.currentTargets = new Float32Array(12);
+    for (let i = 0; i < 12; i++) this.currentTargets[i] = this.defaultPos[i];
+    this.forwardSpeed = 0;
+    this.lateralSpeed = 0;
+    this.turnRate = 0;
+    this.jntQpos = new Int32Array(12);
+    this.jntDof = new Int32Array(12);
+    this.findJointIndices();
+    this.footGeomIds = [-1, -1, -1, -1];
+    this.floorGeomId = -1;
+    this.findFootGeoms();
+  }
+  findJointIndices() {
+    const jointNames = [
+      "FL_hip_joint",
+      "FL_thigh_joint",
+      "FL_calf_joint",
+      "FR_hip_joint",
+      "FR_thigh_joint",
+      "FR_calf_joint",
+      "RL_hip_joint",
+      "RL_thigh_joint",
+      "RL_calf_joint",
+      "RR_hip_joint",
+      "RR_thigh_joint",
+      "RR_calf_joint"
+    ];
+    for (let i = 0; i < 12; i++) {
+      try {
+        const jid = this.mujoco.mj_name2id(this.model, 3, jointNames[i]);
+        if (jid >= 0) {
+          this.jntQpos[i] = this.model.jnt_qposadr[jid];
+          this.jntDof[i] = this.model.jnt_dofadr[jid];
+        }
+      } catch (e) {
+      }
+    }
+  }
+  findFootGeoms() {
+    const footGeomNames = ["FL", "FR", "RL", "RR"];
+    for (let i = 0; i < 4; i++) {
+      try {
+        const gid = this.mujoco.mj_name2id(this.model, 5, footGeomNames[i]);
+        if (gid >= 0) this.footGeomIds[i] = gid;
+      } catch (e) {
+      }
+    }
+    try {
+      this.floorGeomId = this.mujoco.mj_name2id(this.model, 5, "floor");
+    } catch (e) {
+    }
+  }
+  async loadModel(modelPath) {
+    if (typeof ort === "undefined") {
+      console.warn("ONNX Runtime Web not loaded");
+      return false;
+    }
+    try {
+      this.session = await ort.InferenceSession.create(modelPath);
+      console.log("Go2 ONNX policy loaded:", modelPath);
+      return true;
+    } catch (e) {
+      console.error("Failed to load ONNX model:", e);
+      return false;
+    }
+  }
+  setCommand(forward, lateral, turn) {
+    this.forwardSpeed = Math.max(-1, Math.min(1, forward));
+    this.lateralSpeed = Math.max(-0.5, Math.min(0.5, lateral));
+    this.turnRate = Math.max(-1, Math.min(1, turn));
+  }
+  /**
+   * Get body angular velocity in body frame.
+   */
+  getBodyAngVel() {
+    const wx = this.data.qvel[3];
+    const wy = this.data.qvel[4];
+    const wz = this.data.qvel[5];
+    const qw = this.data.qpos[3];
+    const qx = this.data.qpos[4];
+    const qy = this.data.qpos[5];
+    const qz = this.data.qpos[6];
+    return this.rotateByInvQuat(wx, wy, wz, qw, qx, qy, qz);
+  }
+  /**
+   * Project gravity into body frame.
+   */
+  getProjectedGravity() {
+    const qw = this.data.qpos[3];
+    const qx = this.data.qpos[4];
+    const qy = this.data.qpos[5];
+    const qz = this.data.qpos[6];
+    return this.rotateByInvQuat(0, 0, -1, qw, qx, qy, qz);
+  }
+  /**
+   * Rotate vector (vx,vy,vz) by inverse of quaternion (qw,qx,qy,qz).
+   */
+  rotateByInvQuat(vx, vy, vz, qw, qx, qy, qz) {
+    const iqx = -qx, iqy = -qy, iqz = -qz;
+    const tx = 2 * (iqy * vz - iqz * vy);
+    const ty = 2 * (iqz * vx - iqx * vz);
+    const tz = 2 * (iqx * vy - iqy * vx);
+    return [
+      vx + qw * tx + (iqy * tz - iqz * ty),
+      vy + qw * ty + (iqz * tx - iqx * tz),
+      vz + qw * tz + (iqx * ty - iqy * tx)
+    ];
+  }
+  /**
+   * Detect binary foot contacts (1 if foot touches floor, 0 otherwise).
+   * Returns [FL, FR, RL, RR].
+   */
+  getFootContacts() {
+    const contacts = [0, 0, 0, 0];
+    const ncon = this.data.ncon || 0;
+    for (let c = 0; c < ncon; c++) {
+      try {
+        const contact = this.data.contact.get(c);
+        const g1 = contact.geom1;
+        const g2 = contact.geom2;
+        const isFloor1 = g1 === this.floorGeomId;
+        const isFloor2 = g2 === this.floorGeomId;
+        if (!isFloor1 && !isFloor2) continue;
+        const otherGeom = isFloor1 ? g2 : g1;
+        for (let f = 0; f < 4; f++) {
+          if (otherGeom === this.footGeomIds[f]) {
+            contacts[f] = 1;
+          }
+        }
+      } catch (e) {
+        break;
+      }
+    }
+    return contacts;
+  }
+  /**
+   * Build the 49-dim observation vector.
+   */
+  buildObs() {
+    const obs = new Float32Array(49);
+    const angVel = this.getBodyAngVel();
+    obs[0] = angVel[0];
+    obs[1] = angVel[1];
+    obs[2] = angVel[2];
+    const grav = this.getProjectedGravity();
+    obs[3] = grav[0];
+    obs[4] = grav[1];
+    obs[5] = grav[2];
+    obs[6] = this.forwardSpeed;
+    obs[7] = this.lateralSpeed;
+    obs[8] = this.turnRate;
+    for (let i = 0; i < 12; i++) {
+      const mjIdx = this.MJ_TO_IL[i];
+      const q = this.data.qpos[this.jntQpos[mjIdx]];
+      obs[9 + i] = q - this.defaultPos[i];
+    }
+    for (let i = 0; i < 12; i++) {
+      const mjIdx = this.MJ_TO_IL[i];
+      obs[21 + i] = this.data.qvel[this.jntDof[mjIdx]];
+    }
+    const contacts = this.getFootContacts();
+    obs[33] = contacts[0];
+    obs[34] = contacts[1];
+    obs[35] = contacts[2];
+    obs[36] = contacts[3];
+    for (let i = 0; i < 12; i++) {
+      obs[37 + i] = this.lastAction[i];
+    }
+    return obs;
+  }
+  /**
+   * Apply PD control to track current position targets.
+   * Called every physics step.
+   */
+  applyPD() {
+    const ctrl = this.data.ctrl;
+    for (let i = 0; i < 12; i++) {
+      const mjIdx = this.IL_TO_MJ[i];
+      const q = this.data.qpos[this.jntQpos[mjIdx]];
+      const qdot = this.data.qvel[this.jntDof[mjIdx]];
+      const target = this.currentTargets[i];
+      const torque = this.Kp * (target - q) - this.Kd * qdot;
+      ctrl[mjIdx] = torque;
+    }
+    if (this.model.actuator_ctrlrange) {
+      for (let i = 0; i < this.model.nu; i++) {
+        const lo = this.model.actuator_ctrlrange[i * 2];
+        const hi = this.model.actuator_ctrlrange[i * 2 + 1];
+        ctrl[i] = Math.max(lo, Math.min(hi, ctrl[i]));
+      }
+    }
+  }
+  /**
+   * Main step function. Called every physics step (synchronous).
+   * Runs policy at decimated rate (async, fire-and-forget).
+   * Applies PD every step using latest targets.
+   */
+  step() {
+    if (!this.enabled) return;
+    this.applyPD();
+    this.stepCount++;
+    if (this.stepCount % this.decimation !== 0) return;
+    if (!this.session || this._inferring) return;
+    this._runInference();
+  }
+  async _runInference() {
+    this._inferring = true;
+    try {
+      const obs = this.buildObs();
+      const input = new ort.Tensor("float32", obs, [1, 49]);
+      const results = await this.session.run({ obs: input });
+      const actions = results.actions.data;
+      for (let i = 0; i < 12; i++) {
+        this.lastAction[i] = actions[i];
+        this.currentTargets[i] = actions[i] * this.actionScale + this.defaultPos[i];
+      }
+    } catch (e) {
+      console.error("ONNX inference error:", e);
+    }
+    this._inferring = false;
+  }
+  reset() {
+    this.stepCount = 0;
+    this.lastAction.fill(0);
+    for (let i = 0; i < 12; i++) {
+      this.currentTargets[i] = this.defaultPos[i];
+    }
+    this.forwardSpeed = 0;
+    this.lateralSpeed = 0;
+    this.turnRate = 0;
+  }
+};
+
 // src/h1CpgController.js
 var H1CpgController = class {
   constructor(mujoco2, model2, data2) {
@@ -28790,6 +29057,7 @@ var bodies = {};
 var mujocoRoot = null;
 var activeController = null;
 var go2Controller = null;
+var go2RlController = null;
 var h1Controller = null;
 var paused = false;
 var cameraFollow = true;
@@ -28816,6 +29084,13 @@ var SCENES = {
     controller: "go2",
     camera: { pos: [1.5, 1, 1.5], target: [0, 0.25, 0] }
   },
+  "unitree_go2/scene.xml|rl": {
+    controller: "go2rl",
+    scenePath: "unitree_go2/scene.xml",
+    // actual XML to load
+    onnxModel: "./assets/models/go2_flat_policy.onnx",
+    camera: { pos: [1.5, 1, 1.5], target: [0, 0.25, 0] }
+  },
   "unitree_go2/scene_stairs.xml": {
     controller: "go2",
     camera: { pos: [2, 1.5, 2], target: [1.2, 0.15, 0] }
@@ -28834,6 +29109,7 @@ var SCENES = {
   }
 };
 var currentScenePath = "unitree_go2/scene.xml";
+var currentSceneKey = "unitree_go2/scene.xml";
 function generateArenaXML(sceneXml, scale) {
   let xml = sceneXml;
   const colors = [
@@ -28920,8 +29196,10 @@ function clearScene() {
   }
   bodies = {};
 }
-async function loadScene(scenePath) {
-  setStatus(`Loading: ${scenePath}`);
+async function loadScene(sceneKey) {
+  setStatus(`Loading: ${sceneKey}`);
+  const cfg = SCENES[sceneKey] || {};
+  const scenePath = cfg.scenePath || sceneKey;
   await loadSceneAssets(mujoco, scenePath, setStatus);
   currentObstacleScale = scenePath.includes("h1") ? 3.5 : 2.5;
   const originalXml = new TextDecoder().decode(mujoco.FS.readFile("/working/" + scenePath));
@@ -28952,9 +29230,9 @@ async function loadScene(scenePath) {
   scene.add(mujocoRoot);
   activeController = null;
   go2Controller = null;
+  go2RlController = null;
   h1Controller = null;
   stepCounter = 0;
-  const cfg = SCENES[scenePath] || {};
   model.opt.iterations = 30;
   if (cfg.controller === "go2") {
     go2Controller = new Go2CpgController(mujoco, model, data);
@@ -28965,6 +29243,27 @@ async function loadScene(scenePath) {
     }
     go2Controller.enabled = true;
     activeController = "go2";
+  } else if (cfg.controller === "go2rl") {
+    go2RlController = new Go2OnnxController(mujoco, model, data);
+    setStatus("Loading RL policy...");
+    const loaded2 = await go2RlController.loadModel(cfg.onnxModel);
+    if (loaded2) {
+      go2RlController.enabled = true;
+      for (let i = 0; i < 200; i++) {
+        go2RlController.applyPD();
+        mujoco.mj_step(model, data);
+      }
+      activeController = "go2rl";
+    } else {
+      setStatus("RL policy load failed, falling back to CPG");
+      go2Controller = new Go2CpgController(mujoco, model, data);
+      go2Controller.enabled = true;
+      for (let i = 0; i < 200; i++) {
+        go2Controller.step();
+        mujoco.mj_step(model, data);
+      }
+      activeController = "go2";
+    }
   } else if (cfg.controller === "h1") {
     h1Controller = new H1CpgController(mujoco, model, data);
     h1Controller.enabled = true;
@@ -28984,12 +29283,16 @@ async function loadScene(scenePath) {
   }
   controls.update();
   currentScenePath = scenePath;
-  setStatus(`Ready: ${scenePath.split("/").pop()}`);
+  currentSceneKey = sceneKey;
+  setStatus(`Ready: ${sceneKey.split("/").pop()}`);
 }
 function updateControllerBtn() {
   if (!controllerBtn) return;
   if (activeController === "go2") {
     controllerBtn.textContent = go2Controller?.enabled ? "CPG: ON" : "CPG: OFF";
+    controllerBtn.style.display = "";
+  } else if (activeController === "go2rl") {
+    controllerBtn.textContent = go2RlController?.enabled ? "RL: ON" : "RL: OFF";
     controllerBtn.style.display = "";
   } else if (activeController === "h1") {
     controllerBtn.textContent = h1Controller?.enabled ? "CPG: ON" : "CPG: OFF";
@@ -29017,6 +29320,14 @@ function resetScene() {
       mujoco.mj_step(model, data);
     }
   }
+  if (go2RlController) {
+    go2RlController.reset();
+    go2RlController.enabled = true;
+    for (let i = 0; i < 200; i++) {
+      go2RlController.applyPD();
+      mujoco.mj_step(model, data);
+    }
+  }
   if (h1Controller) {
     h1Controller.reset();
     h1Controller.enabled = true;
@@ -29030,6 +29341,8 @@ function resetScene() {
 function toggleController() {
   if (activeController === "go2" && go2Controller) {
     go2Controller.enabled = !go2Controller.enabled;
+  } else if (activeController === "go2rl" && go2RlController) {
+    go2RlController.enabled = !go2RlController.enabled;
   } else if (activeController === "h1" && h1Controller) {
     h1Controller.enabled = !h1Controller.enabled;
   }
@@ -29065,6 +29378,9 @@ function handleInput() {
   if (touchRotR) turn = -0.5;
   if (activeController === "go2" && go2Controller && go2Controller.enabled) {
     go2Controller.setCommand(fwd, lat, turn);
+  }
+  if (activeController === "go2rl" && go2RlController && go2RlController.enabled) {
+    go2RlController.setCommand(fwd, lat, turn);
   }
   if (activeController === "h1" && h1Controller && h1Controller.enabled) {
     h1Controller.setCommand(fwd, lat, turn);
@@ -29246,6 +29562,7 @@ function setupControls() {
       const nsteps = Math.min(Math.round(frameDt / timestep * simSpeed), MAX_SUBSTEPS);
       for (let s = 0; s < nsteps; s++) {
         if (activeController === "go2" && go2Controller) go2Controller.step();
+        if (activeController === "go2rl" && go2RlController) go2RlController.step();
         if (activeController === "h1" && h1Controller) h1Controller.step();
         mujoco.mj_step(model, data);
         stepCounter++;

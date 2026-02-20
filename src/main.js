@@ -9,6 +9,7 @@ import load_mujoco from 'https://cdn.jsdelivr.net/npm/mujoco-js@0.0.7/dist/mujoc
 import { buildScene, getPosition, getQuaternion } from './meshBuilder.js';
 import { loadSceneAssets } from './assetLoader.js';
 import { Go2CpgController } from './go2CpgController.js';
+import { Go2OnnxController } from './go2OnnxController.js';
 import { H1CpgController } from './h1CpgController.js';
 
 // ─── DOM ────────────────────────────────────────────────────────────
@@ -48,8 +49,9 @@ let data;
 let bodies = {};
 let mujocoRoot = null;
 
-let activeController = null; // 'go2' | 'h1' | null
+let activeController = null; // 'go2' | 'go2rl' | 'h1' | null
 let go2Controller = null;
+let go2RlController = null;
 let h1Controller = null;
 
 let paused = false;
@@ -88,6 +90,12 @@ const SCENES = {
     controller: 'go2',
     camera: { pos: [1.5, 1.0, 1.5], target: [0, 0.25, 0] },
   },
+  'unitree_go2/scene.xml|rl': {
+    controller: 'go2rl',
+    scenePath: 'unitree_go2/scene.xml', // actual XML to load
+    onnxModel: './assets/models/go2_flat_policy.onnx',
+    camera: { pos: [1.5, 1.0, 1.5], target: [0, 0.25, 0] },
+  },
   'unitree_go2/scene_stairs.xml': {
     controller: 'go2',
     camera: { pos: [2.0, 1.5, 2.0], target: [1.2, 0.15, 0] },
@@ -107,6 +115,7 @@ const SCENES = {
 };
 
 let currentScenePath = 'unitree_go2/scene.xml';
+let currentSceneKey = 'unitree_go2/scene.xml';
 
 // ─── Obstacle XML Generation ────────────────────────────────────────
 function generateArenaXML(sceneXml, scale) {
@@ -206,8 +215,12 @@ function clearScene() {
   bodies = {};
 }
 
-async function loadScene(scenePath) {
-  setStatus(`Loading: ${scenePath}`);
+async function loadScene(sceneKey) {
+  setStatus(`Loading: ${sceneKey}`);
+
+  const cfg = SCENES[sceneKey] || {};
+  // Resolve actual scene XML path (for RL scenes that reuse the same XML)
+  const scenePath = cfg.scenePath || sceneKey;
 
   await loadSceneAssets(mujoco, scenePath, setStatus);
 
@@ -243,10 +256,10 @@ async function loadScene(scenePath) {
   // Setup controller
   activeController = null;
   go2Controller = null;
+  go2RlController = null;
   h1Controller = null;
   stepCounter = 0;
 
-  const cfg = SCENES[scenePath] || {};
   model.opt.iterations = 30;
 
   if (cfg.controller === 'go2') {
@@ -258,9 +271,31 @@ async function loadScene(scenePath) {
     }
     go2Controller.enabled = true;
     activeController = 'go2';
+  } else if (cfg.controller === 'go2rl') {
+    go2RlController = new Go2OnnxController(mujoco, model, data);
+    setStatus('Loading RL policy...');
+    const loaded = await go2RlController.loadModel(cfg.onnxModel);
+    if (loaded) {
+      go2RlController.enabled = true;
+      // Warm-up: PD hold at default pose, then run policy
+      for (let i = 0; i < 200; i++) {
+        go2RlController.applyPD();
+        mujoco.mj_step(model, data);
+      }
+      activeController = 'go2rl';
+    } else {
+      setStatus('RL policy load failed, falling back to CPG');
+      go2Controller = new Go2CpgController(mujoco, model, data);
+      go2Controller.enabled = true;
+      for (let i = 0; i < 200; i++) {
+        go2Controller.step();
+        mujoco.mj_step(model, data);
+      }
+      activeController = 'go2';
+    }
   } else if (cfg.controller === 'h1') {
     h1Controller = new H1CpgController(mujoco, model, data);
-    h1Controller.enabled = true; // Enable BEFORE warm-up so PD holds the robot upright
+    h1Controller.enabled = true;
     for (let i = 0; i < 500; i++) {
       h1Controller.step();
       mujoco.mj_step(model, data);
@@ -280,13 +315,17 @@ async function loadScene(scenePath) {
   controls.update();
 
   currentScenePath = scenePath;
-  setStatus(`Ready: ${scenePath.split('/').pop()}`);
+  currentSceneKey = sceneKey;
+  setStatus(`Ready: ${sceneKey.split('/').pop()}`);
 }
 
 function updateControllerBtn() {
   if (!controllerBtn) return;
   if (activeController === 'go2') {
     controllerBtn.textContent = go2Controller?.enabled ? 'CPG: ON' : 'CPG: OFF';
+    controllerBtn.style.display = '';
+  } else if (activeController === 'go2rl') {
+    controllerBtn.textContent = go2RlController?.enabled ? 'RL: ON' : 'RL: OFF';
     controllerBtn.style.display = '';
   } else if (activeController === 'h1') {
     controllerBtn.textContent = h1Controller?.enabled ? 'CPG: ON' : 'CPG: OFF';
@@ -318,6 +357,14 @@ function resetScene() {
       mujoco.mj_step(model, data);
     }
   }
+  if (go2RlController) {
+    go2RlController.reset();
+    go2RlController.enabled = true;
+    for (let i = 0; i < 200; i++) {
+      go2RlController.applyPD();
+      mujoco.mj_step(model, data);
+    }
+  }
   if (h1Controller) {
     h1Controller.reset();
     h1Controller.enabled = true;
@@ -332,6 +379,8 @@ function resetScene() {
 function toggleController() {
   if (activeController === 'go2' && go2Controller) {
     go2Controller.enabled = !go2Controller.enabled;
+  } else if (activeController === 'go2rl' && go2RlController) {
+    go2RlController.enabled = !go2RlController.enabled;
   } else if (activeController === 'h1' && h1Controller) {
     h1Controller.enabled = !h1Controller.enabled;
   }
@@ -377,6 +426,9 @@ function handleInput() {
 
   if (activeController === 'go2' && go2Controller && go2Controller.enabled) {
     go2Controller.setCommand(fwd, lat, turn);
+  }
+  if (activeController === 'go2rl' && go2RlController && go2RlController.enabled) {
+    go2RlController.setCommand(fwd, lat, turn);
   }
   if (activeController === 'h1' && h1Controller && h1Controller.enabled) {
     h1Controller.setCommand(fwd, lat, turn);
@@ -553,6 +605,7 @@ function setupControls() {
 
       for (let s = 0; s < nsteps; s++) {
         if (activeController === 'go2' && go2Controller) go2Controller.step();
+        if (activeController === 'go2rl' && go2RlController) go2RlController.step();
         if (activeController === 'h1' && h1Controller) h1Controller.step();
         mujoco.mj_step(model, data);
         stepCounter++;
