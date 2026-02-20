@@ -137,8 +137,10 @@ class SingleH1CPG {
     const direction = 1;
 
     const { pitch, roll } = this.getTrunkOrientation();
-    const pitchRate = (pitch - this.prevPitch) / this.simDt;
-    const rollRate = (roll - this.prevRoll) / this.simDt;
+    const rawPR = (pitch - this.prevPitch) / this.simDt;
+    const rawRR = (roll - this.prevRoll) / this.simDt;
+    const pitchRate = Math.max(-8, Math.min(8, rawPR));
+    const rollRate = Math.max(-8, Math.min(8, rawRR));
     this.prevPitch = pitch;
     this.prevRoll = roll;
 

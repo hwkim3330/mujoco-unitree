@@ -121,8 +121,10 @@ export class Go2CpgController {
     const direction = Math.sign(this.forwardSpeed) || 1;
 
     const { pitch, roll } = this.getTrunkOrientation();
-    const pitchRate = (pitch - this.prevPitch) / this.simDt;
-    const rollRate = (roll - this.prevRoll) / this.simDt;
+    const rawPR = (pitch - this.prevPitch) / this.simDt;
+    const rawRR = (roll - this.prevRoll) / this.simDt;
+    const pitchRate = Math.max(-10, Math.min(10, rawPR));
+    const rollRate = Math.max(-10, Math.min(10, rawRR));
     this.prevPitch = pitch;
     this.prevRoll = roll;
 

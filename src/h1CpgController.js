@@ -149,10 +149,12 @@ export class H1CpgController {
       ? Math.max(0.25, fwdMag + latMag * 0.4 + turnMag * 0.3) : 0;
     const direction = Math.sign(this.forwardSpeed) || 1;
 
-    // Get trunk orientation for balance
+    // Get trunk orientation for balance (clamp rate to prevent derivative spikes)
     const { pitch, roll } = this.getTrunkOrientation();
-    const pitchRate = (pitch - this.prevPitch) / this.simDt;
-    const rollRate = (roll - this.prevRoll) / this.simDt;
+    const rawPR = (pitch - this.prevPitch) / this.simDt;
+    const rawRR = (roll - this.prevRoll) / this.simDt;
+    const pitchRate = Math.max(-8, Math.min(8, rawPR));
+    const rollRate = Math.max(-8, Math.min(8, rawRR));
     this.prevPitch = pitch;
     this.prevRoll = roll;
 

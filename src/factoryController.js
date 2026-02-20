@@ -135,8 +135,10 @@ class SingleRobotCPG {
     const direction = Math.sign(this.forwardSpeed) || 1;
 
     const { pitch, roll } = this.getTrunkOrientation();
-    const pitchRate = (pitch - this.prevPitch) / this.simDt;
-    const rollRate = (roll - this.prevRoll) / this.simDt;
+    const rawPR = (pitch - this.prevPitch) / this.simDt;
+    const rawRR = (roll - this.prevRoll) / this.simDt;
+    const pitchRate = Math.max(-10, Math.min(10, rawPR));
+    const rollRate = Math.max(-10, Math.min(10, rawRR));
     this.prevPitch = pitch;
     this.prevRoll = roll;
 
@@ -181,9 +183,9 @@ class SingleRobotCPG {
       ctrl[base + actOff + 1] = this.pdTorque(thighJoint, thighTarget, this.thighKp, this.thighKd);
       ctrl[base + actOff + 2] = this.pdTorque(calfJoint, calfTarget, this.calfKp, this.calfKd);
 
-      // Balance corrections
-      ctrl[base + actOff + 1] += pitchCorr * 0.2;
-      ctrl[base + actOff + 0] += rollCorr * 0.15 * side;
+      // Balance corrections (match Go2 multipliers)
+      ctrl[base + actOff + 1] += pitchCorr * 0.15;
+      ctrl[base + actOff + 0] += rollCorr * 0.10 * side;
     }
 
     // Clamp to actuator ranges
