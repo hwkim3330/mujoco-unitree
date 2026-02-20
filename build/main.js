@@ -30747,52 +30747,28 @@ var H1OnnxController = class {
     this.decimation = 10;
     this.stepCount = 0;
     this.actionScale = 0.25;
+    this.actionClip = 1;
     this.defaultAngles = new Float32Array([
       0,
       0,
       -0.1,
       0.3,
       -0.2,
+      // left: yaw, roll, pitch, knee, ankle
       0,
       0,
       -0.1,
       0.3,
       -0.2
-    ]);
-    this.kp = new Float32Array([
-      150,
-      150,
-      150,
-      200,
-      40,
-      // left: yaw, roll, pitch, knee, ankle
-      150,
-      150,
-      150,
-      200,
-      40
       // right
     ]);
-    this.kd = new Float32Array([
-      2,
-      2,
-      2,
-      4,
-      2,
-      // left
-      2,
-      2,
-      2,
-      4,
-      2
-      // right
-    ]);
+    this.kp = new Float32Array([150, 150, 150, 200, 40, 150, 150, 150, 200, 40]);
+    this.kd = new Float32Array([2, 2, 2, 4, 2, 2, 2, 2, 4, 2]);
     this.obsScales = {
       angVel: 0.25,
       dofPos: 1,
       dofVel: 0.05,
       cmdScale: [2, 2, 0.25]
-      // [vx, vy, wz]
     };
     this.phase = 0;
     this.gaitFreq = 1.25;
@@ -30809,6 +30785,8 @@ var H1OnnxController = class {
     this.jntQpos = new Int32Array(10);
     this.jntDof = new Int32Array(10);
     this.findJointIndices();
+    this.upperBody = [];
+    this.findUpperBodyJoints();
     this._inferring = false;
   }
   findJointIndices() {
@@ -30835,6 +30813,38 @@ var H1OnnxController = class {
       }
     }
   }
+  findUpperBodyJoints() {
+    const upperNames = [
+      { name: "torso", target: 0, kp: 100, kd: 5 },
+      { name: "left_shoulder_pitch", target: 0, kp: 40, kd: 2 },
+      { name: "left_shoulder_roll", target: 0.2, kp: 40, kd: 2 },
+      { name: "left_shoulder_yaw", target: 0, kp: 40, kd: 2 },
+      { name: "left_elbow", target: -0.3, kp: 40, kd: 2 },
+      { name: "right_shoulder_pitch", target: 0, kp: 40, kd: 2 },
+      { name: "right_shoulder_roll", target: -0.2, kp: 40, kd: 2 },
+      { name: "right_shoulder_yaw", target: 0, kp: 40, kd: 2 },
+      { name: "right_elbow", target: -0.3, kp: 40, kd: 2 }
+    ];
+    for (const j of upperNames) {
+      try {
+        const jid = this.mujoco.mj_name2id(this.model, 3, j.name);
+        if (jid < 0) continue;
+        const qposadr = this.model.jnt_qposadr[jid];
+        const dofadr = this.model.jnt_dofadr[jid];
+        let actId = -1;
+        for (let a = 0; a < this.model.nu; a++) {
+          if (this.model.actuator_trnid[a * 2] === jid) {
+            actId = a;
+            break;
+          }
+        }
+        if (actId >= 0) {
+          this.upperBody.push({ actId, qposadr, dofadr, target: j.target, kp: j.kp, kd: j.kd });
+        }
+      } catch (e) {
+      }
+    }
+  }
   async loadModel(modelPath) {
     if (typeof ort === "undefined") {
       console.warn("ONNX Runtime Web not loaded");
@@ -30855,14 +30865,17 @@ var H1OnnxController = class {
     this.turnRate = Math.max(-1, Math.min(1, turn));
   }
   setInitialPose() {
-    for (let i = 0; i < 10; i++) {
-      this.data.qpos[this.jntQpos[i]] = this.defaultAngles[i];
+    if (this.model.nkey > 0) {
+      this.data.qpos.set(this.model.key_qpos.slice(0, this.model.nq));
+    } else {
+      for (let i = 0; i < 10; i++) {
+        this.data.qpos[this.jntQpos[i]] = this.defaultAngles[i];
+      }
+      this.data.qpos[2] = 1;
     }
-    this.data.qpos[2] = 1;
     for (let i = 0; i < this.model.nv; i++) this.data.qvel[i] = 0;
     this.mujoco.mj_forward(this.model, this.data);
   }
-  // Rotate vector by inverse of body quaternion (world→body frame)
   rotateByInvQuat(vx, vy, vz) {
     const qw = this.data.qpos[3];
     const qx = this.data.qpos[4];
@@ -30913,8 +30926,12 @@ var H1OnnxController = class {
     for (let i = 0; i < 10; i++) {
       const q = this.data.qpos[this.jntQpos[i]];
       const qdot = this.data.qvel[this.jntDof[i]];
-      const torque = this.kp[i] * (this.currentTargets[i] - q) - this.kd[i] * qdot;
-      ctrl[i] = torque;
+      ctrl[i] = this.kp[i] * (this.currentTargets[i] - q) - this.kd[i] * qdot;
+    }
+    for (const j of this.upperBody) {
+      const q = this.data.qpos[j.qposadr];
+      const qdot = this.data.qvel[j.dofadr];
+      ctrl[j.actId] = j.kp * (j.target - q) - j.kd * qdot;
     }
     if (this.model.actuator_ctrlrange) {
       for (let i = 0; i < this.model.nu; i++) {
@@ -30946,7 +30963,7 @@ var H1OnnxController = class {
       this.h0 = new Float32Array(results.h_out.data);
       this.c0 = new Float32Array(results.c_out.data);
       for (let i = 0; i < 10; i++) {
-        const a = Math.max(-5, Math.min(5, actions[i]));
+        const a = Math.max(-this.actionClip, Math.min(this.actionClip, actions[i]));
         this.lastAction[i] = a;
         this.currentTargets[i] = a * this.actionScale + this.defaultAngles[i];
       }
@@ -31567,6 +31584,8 @@ var H1_2OnnxController = class {
     this.jntQpos = new Int32Array(12);
     this.jntDof = new Int32Array(12);
     this.findJointIndices();
+    this.upperBody = [];
+    this.findUpperBodyJoints();
     this._inferring = false;
   }
   findJointIndices() {
@@ -31590,6 +31609,44 @@ var H1_2OnnxController = class {
         if (jid >= 0) {
           this.jntQpos[i] = this.model.jnt_qposadr[jid];
           this.jntDof[i] = this.model.jnt_dofadr[jid];
+        }
+      } catch (e) {
+      }
+    }
+  }
+  findUpperBodyJoints() {
+    const upperNames = [
+      { name: "torso_joint", target: 0, kp: 200, kd: 5 },
+      { name: "left_shoulder_pitch_joint", target: 0.2, kp: 80, kd: 2 },
+      { name: "left_shoulder_roll_joint", target: 0.2, kp: 80, kd: 2 },
+      { name: "left_shoulder_yaw_joint", target: 0, kp: 40, kd: 2 },
+      { name: "left_elbow_joint", target: -0.3, kp: 40, kd: 2 },
+      { name: "left_wrist_roll_joint", target: 0, kp: 20, kd: 1 },
+      { name: "left_wrist_pitch_joint", target: 0, kp: 20, kd: 1 },
+      { name: "left_wrist_yaw_joint", target: 0, kp: 20, kd: 1 },
+      { name: "right_shoulder_pitch_joint", target: 0.2, kp: 80, kd: 2 },
+      { name: "right_shoulder_roll_joint", target: -0.2, kp: 80, kd: 2 },
+      { name: "right_shoulder_yaw_joint", target: 0, kp: 40, kd: 2 },
+      { name: "right_elbow_joint", target: -0.3, kp: 40, kd: 2 },
+      { name: "right_wrist_roll_joint", target: 0, kp: 20, kd: 1 },
+      { name: "right_wrist_pitch_joint", target: 0, kp: 20, kd: 1 },
+      { name: "right_wrist_yaw_joint", target: 0, kp: 20, kd: 1 }
+    ];
+    for (const j of upperNames) {
+      try {
+        const jid = this.mujoco.mj_name2id(this.model, 3, j.name);
+        if (jid < 0) continue;
+        const qposadr = this.model.jnt_qposadr[jid];
+        const dofadr = this.model.jnt_dofadr[jid];
+        let actId = -1;
+        for (let a = 0; a < this.model.nu; a++) {
+          if (this.model.actuator_trnid[a * 2] === jid) {
+            actId = a;
+            break;
+          }
+        }
+        if (actId >= 0) {
+          this.upperBody.push({ actId, qposadr, dofadr, target: j.target, kp: j.kp, kd: j.kd });
         }
       } catch (e) {
       }
@@ -31673,8 +31730,12 @@ var H1_2OnnxController = class {
     for (let i = 0; i < 12; i++) {
       const q = this.data.qpos[this.jntQpos[i]];
       const qdot = this.data.qvel[this.jntDof[i]];
-      const torque = this.kp[i] * (this.currentTargets[i] - q) - this.kd[i] * qdot;
-      ctrl[i] = torque;
+      ctrl[i] = this.kp[i] * (this.currentTargets[i] - q) - this.kd[i] * qdot;
+    }
+    for (const j of this.upperBody) {
+      const q = this.data.qpos[j.qposadr];
+      const qdot = this.data.qvel[j.dofadr];
+      ctrl[j.actId] = j.kp * (j.target - q) - j.kd * qdot;
     }
     if (this.model.actuator_ctrlrange) {
       for (let i = 0; i < this.model.nu; i++) {

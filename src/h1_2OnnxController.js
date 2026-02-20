@@ -102,6 +102,10 @@ export class H1_2OnnxController {
     this.jntDof = new Int32Array(12);
     this.findJointIndices();
 
+    // Upper body PD hold (torso + arms: actuators 12-26)
+    this.upperBody = [];
+    this.findUpperBodyJoints();
+
     this._inferring = false;
   }
 
@@ -118,6 +122,44 @@ export class H1_2OnnxController {
         if (jid >= 0) {
           this.jntQpos[i] = this.model.jnt_qposadr[jid];
           this.jntDof[i] = this.model.jnt_dofadr[jid];
+        }
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  findUpperBodyJoints() {
+    // H1-2 upper body: torso + 7 left arm + 7 right arm (actuators 12-26)
+    const upperNames = [
+      { name: 'torso_joint', target: 0, kp: 200, kd: 5 },
+      { name: 'left_shoulder_pitch_joint', target: 0.2, kp: 80, kd: 2 },
+      { name: 'left_shoulder_roll_joint', target: 0.2, kp: 80, kd: 2 },
+      { name: 'left_shoulder_yaw_joint', target: 0, kp: 40, kd: 2 },
+      { name: 'left_elbow_joint', target: -0.3, kp: 40, kd: 2 },
+      { name: 'left_wrist_roll_joint', target: 0, kp: 20, kd: 1 },
+      { name: 'left_wrist_pitch_joint', target: 0, kp: 20, kd: 1 },
+      { name: 'left_wrist_yaw_joint', target: 0, kp: 20, kd: 1 },
+      { name: 'right_shoulder_pitch_joint', target: 0.2, kp: 80, kd: 2 },
+      { name: 'right_shoulder_roll_joint', target: -0.2, kp: 80, kd: 2 },
+      { name: 'right_shoulder_yaw_joint', target: 0, kp: 40, kd: 2 },
+      { name: 'right_elbow_joint', target: -0.3, kp: 40, kd: 2 },
+      { name: 'right_wrist_roll_joint', target: 0, kp: 20, kd: 1 },
+      { name: 'right_wrist_pitch_joint', target: 0, kp: 20, kd: 1 },
+      { name: 'right_wrist_yaw_joint', target: 0, kp: 20, kd: 1 },
+    ];
+
+    for (const j of upperNames) {
+      try {
+        const jid = this.mujoco.mj_name2id(this.model, 3, j.name);
+        if (jid < 0) continue;
+        const qposadr = this.model.jnt_qposadr[jid];
+        const dofadr = this.model.jnt_dofadr[jid];
+        // Find actuator for this joint
+        let actId = -1;
+        for (let a = 0; a < this.model.nu; a++) {
+          if (this.model.actuator_trnid[a * 2] === jid) { actId = a; break; }
+        }
+        if (actId >= 0) {
+          this.upperBody.push({ actId, qposadr, dofadr, target: j.target, kp: j.kp, kd: j.kd });
         }
       } catch (e) { /* ignore */ }
     }
@@ -219,14 +261,22 @@ export class H1_2OnnxController {
 
   applyPD() {
     const ctrl = this.data.ctrl;
+
+    // Legs: policy targets
     for (let i = 0; i < 12; i++) {
       const q = this.data.qpos[this.jntQpos[i]];
       const qdot = this.data.qvel[this.jntDof[i]];
-      const torque = this.kp[i] * (this.currentTargets[i] - q) - this.kd[i] * qdot;
-      ctrl[i] = torque;
+      ctrl[i] = this.kp[i] * (this.currentTargets[i] - q) - this.kd[i] * qdot;
     }
 
-    // Clamp to actuator ranges
+    // Upper body: hold at home pose
+    for (const j of this.upperBody) {
+      const q = this.data.qpos[j.qposadr];
+      const qdot = this.data.qvel[j.dofadr];
+      ctrl[j.actId] = j.kp * (j.target - q) - j.kd * qdot;
+    }
+
+    // Clamp all actuators
     if (this.model.actuator_ctrlrange) {
       for (let i = 0; i < this.model.nu; i++) {
         const lo = this.model.actuator_ctrlrange[i * 2];
