@@ -379,8 +379,8 @@ export class EvolutionRunner {
     this.stepCount++;
     this.evo.currentStep = this.stepCount;
 
-    // Check for fallen robots
-    this.evo.checkFallen(this.robots);
+    // Check for fallen robots (disables them to save compute)
+    this.evo.checkFallen(this.robots, this.stepCount);
 
     // End of evaluation period
     if (this.stepCount >= this.evalSteps) {
@@ -390,7 +390,7 @@ export class EvolutionRunner {
       const result = this.evo.evaluateFitness(this.robots);
       console.log(
         `Gen ${this.evo.generation}: best=${result.bestFit.toFixed(1)}, ` +
-        `avg=${result.avg.toFixed(1)}, worst=${result.worst.toFixed(1)}`
+        `avg=${result.avg.toFixed(1)}, standing=${result.standing}/${this.numRobots}`
       );
 
       // Evolve

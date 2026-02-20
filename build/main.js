@@ -2272,11 +2272,15 @@ var HUMANOID_GENES = [
   { name: "leanForward", min: -0.1, max: 0.2, def: 0.05 },
   { name: "legKp", min: 200, max: 1500, def: 800 }
 ];
-function randomGenome(geneDefs) {
-  return geneDefs.map((g) => g.min + Math.random() * (g.max - g.min));
-}
 function defaultGenome(geneDefs) {
   return geneDefs.map((g) => g.def);
+}
+function perturbedGenome(geneDefs, strength = 0.15) {
+  return geneDefs.map((g) => {
+    const range = g.max - g.min;
+    const noise = (Math.random() - 0.5) * 2 * strength * range;
+    return Math.max(g.min, Math.min(g.max, g.def + noise));
+  });
 }
 function crossover(parent1, parent2) {
   const child = new Float64Array(parent1.length);
@@ -2326,9 +2330,10 @@ var EvolutionController = class _EvolutionController {
     this.fitnesses = new Float64Array(populationSize);
     this.startPositions = new Float64Array(populationSize * 3);
     this.fallen = new Uint8Array(populationSize);
+    this.fallStep = new Float64Array(populationSize);
     this.population.push(defaultGenome(this.geneDefs));
     for (let i = 1; i < populationSize; i++) {
-      this.population.push(randomGenome(this.geneDefs));
+      this.population.push(perturbedGenome(this.geneDefs, 0.15));
     }
     this.history = [];
     this.enabled = false;
@@ -2354,27 +2359,37 @@ var EvolutionController = class _EvolutionController {
       this.startPositions[i * 3 + 2] = data2.qpos[addr + 2];
     }
     this.fallen.fill(0);
+    this.fallStep.fill(0);
   }
   /**
    * Check if a robot has fallen (base z too low or tilted too much).
+   * Also disables fallen robots to save compute.
    */
-  checkFallen(robots) {
+  checkFallen(robots, currentStep) {
     for (let i = 0; i < this.populationSize; i++) {
       if (this.fallen[i]) continue;
       const addr = robots[i].baseQposAddr;
       const data2 = robots[i].data;
       const z = data2.qpos[addr + 2];
       const threshold = this.robotType === "humanoid" ? 0.4 : 0.1;
-      if (z < threshold) this.fallen[i] = 1;
+      if (z < threshold) {
+        this.fallen[i] = 1;
+        this.fallStep[i] = currentStep;
+        robots[i].enabled = false;
+      }
     }
   }
   /**
    * Evaluate fitness for all robots after evaluation period.
-   * Fitness = forward distance + upright bonus - lateral penalty
+   * Fitness = survival × (forward distance + upright bonus) + survival bonus - penalties
+   *
+   * Key insight: survival ratio gates everything. A robot that falls at 10%
+   * gets almost nothing even if it flew forward. Standing still = decent baseline.
    */
   evaluateFitness(robots) {
     let bestFit = -Infinity;
     let bestIdx = 0;
+    this.standingCount = 0;
     for (let i = 0; i < this.populationSize; i++) {
       const addr = robots[i].baseQposAddr;
       const data2 = robots[i].data;
@@ -2383,16 +2398,20 @@ var EvolutionController = class _EvolutionController {
       const endX = data2.qpos[addr + 0];
       const endY = data2.qpos[addr + 1];
       const endZ = data2.qpos[addr + 2];
+      const aliveSteps = this.fallen[i] ? this.fallStep[i] : this.evalSteps;
+      const survivalRatio = aliveSteps / this.evalSteps;
       const fwdDist = endX - startX;
       const latDist = Math.abs(endY - startY);
-      const uprightBonus = this.fallen[i] ? 0 : endZ * 2;
-      let fitness = fwdDist * 10 + uprightBonus - latDist * 2;
-      if (this.fallen[i]) fitness -= 5;
+      const uprightBonus = this.fallen[i] ? 0 : endZ * 3;
+      const survivalBonus = survivalRatio * 8;
+      let fitness = survivalRatio * (fwdDist * 10 + uprightBonus) + survivalBonus - latDist * 2;
+      if (this.fallen[i]) fitness -= 3;
       this.fitnesses[i] = fitness;
       if (fitness > bestFit) {
         bestFit = fitness;
         bestIdx = i;
       }
+      if (!this.fallen[i]) this.standingCount++;
     }
     this.bestFitness = bestFit;
     this.bestGenome = [...this.population[bestIdx]];
@@ -2406,13 +2425,15 @@ var EvolutionController = class _EvolutionController {
       gen: this.generation,
       best: bestFit,
       avg,
-      worst
+      worst,
+      standing: this.standingCount
     });
-    return { bestFit, bestIdx, avg, worst };
+    return { bestFit, bestIdx, avg, worst, standing: this.standingCount };
   }
   /**
    * Create next generation using tournament selection, crossover, and mutation.
-   * Elitism: best genome passes unchanged.
+   * Elitism: top 2 genomes pass unchanged.
+   * Fresh injection: 1 perturbed-default genome maintains diversity.
    */
   evolve() {
     const newPop = [];
@@ -2421,12 +2442,16 @@ var EvolutionController = class _EvolutionController {
     } else {
       newPop.push([...this.population[0]]);
     }
+    if (this.bestGenome && JSON.stringify(this.bestGenome) !== JSON.stringify(newPop[0])) {
+      newPop.push([...this.bestGenome]);
+    }
+    newPop.push(perturbedGenome(this.geneDefs, 0.12));
     while (newPop.length < this.populationSize) {
       const parent1 = tournamentSelect(this.population, this.fitnesses);
       const parent2 = tournamentSelect(this.population, this.fitnesses);
       let child = crossover(parent1, parent2);
-      const mutRate = this.generation < 10 ? 0.35 : 0.2;
-      const mutStrength = this.generation < 10 ? 0.2 : 0.12;
+      const mutRate = this.generation < 15 ? 0.35 : 0.2;
+      const mutStrength = this.generation < 15 ? 0.18 : 0.1;
       child = mutate(child, this.geneDefs, mutRate, mutStrength);
       newPop.push(child);
     }
@@ -2471,7 +2496,8 @@ var EvolutionController = class _EvolutionController {
   getStatusText() {
     const progress = Math.floor(this.currentStep / this.evalSteps * 100);
     const best = this.bestEverFitness > -Infinity ? this.bestEverFitness.toFixed(1) : "--";
-    return `Gen ${this.generation} | ${progress}% | Best: ${best}`;
+    const standing = this.standingCount !== void 0 ? ` | Up: ${this.standingCount}/${this.populationSize}` : "";
+    return `Gen ${this.generation} | ${progress}%${standing} | Best: ${best}`;
   }
   /**
    * Get gene names and values for a specific robot (for debug/display).
@@ -2871,12 +2897,12 @@ var EvolutionRunner = class {
     for (const r of this.robots) r.step();
     this.stepCount++;
     this.evo.currentStep = this.stepCount;
-    this.evo.checkFallen(this.robots);
+    this.evo.checkFallen(this.robots, this.stepCount);
     if (this.stepCount >= this.evalSteps) {
       this.evaluating = false;
       const result = this.evo.evaluateFitness(this.robots);
       console.log(
-        `Gen ${this.evo.generation}: best=${result.bestFit.toFixed(1)}, avg=${result.avg.toFixed(1)}, worst=${result.worst.toFixed(1)}`
+        `Gen ${this.evo.generation}: best=${result.bestFit.toFixed(1)}, avg=${result.avg.toFixed(1)}, standing=${result.standing}/${this.numRobots}`
       );
       this.evo.evolve();
       this.evo.save();
@@ -3104,10 +3130,10 @@ var SCENES = {
   },
   "unitree_h1/scene_evolve": {
     controller: "evolve",
-    numRobots: 9,
-    spacing: 3,
-    evalSeconds: 8,
-    camera: { pos: [6, 5, 6], target: [0, 0.9, 0] }
+    numRobots: 16,
+    spacing: 2.5,
+    evalSeconds: 12,
+    camera: { pos: [8, 6, 8], target: [0, 0.9, 0] }
   }
 };
 var currentScenePath = "unitree_go2/scene.xml";

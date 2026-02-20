@@ -50,6 +50,18 @@ function defaultGenome(geneDefs) {
   return geneDefs.map(g => g.def);
 }
 
+/**
+ * Create a genome as a small perturbation of the defaults.
+ * This "warm start" ensures all initial robots can roughly walk.
+ */
+function perturbedGenome(geneDefs, strength = 0.15) {
+  return geneDefs.map(g => {
+    const range = g.max - g.min;
+    const noise = (Math.random() - 0.5) * 2 * strength * range;
+    return Math.max(g.min, Math.min(g.max, g.def + noise));
+  });
+}
+
 function crossover(parent1, parent2) {
   const child = new Float64Array(parent1.length);
   const crossPoint = Math.floor(Math.random() * parent1.length);
@@ -107,11 +119,13 @@ export class EvolutionController {
     this.fitnesses = new Float64Array(populationSize);
     this.startPositions = new Float64Array(populationSize * 3); // x, y, z per robot
     this.fallen = new Uint8Array(populationSize); // 1 if robot has fallen
+    this.fallStep = new Float64Array(populationSize); // step when each robot fell
 
-    // Initialize population: first robot gets defaults, rest are random
+    // Warm start: robot 0 = exact defaults, rest = small perturbations
+    // This ensures ALL robots can roughly stand/walk from gen 0
     this.population.push(defaultGenome(this.geneDefs));
     for (let i = 1; i < populationSize; i++) {
-      this.population.push(randomGenome(this.geneDefs));
+      this.population.push(perturbedGenome(this.geneDefs, 0.15));
     }
 
     // Stats history for display
@@ -142,12 +156,14 @@ export class EvolutionController {
       this.startPositions[i * 3 + 2] = data.qpos[addr + 2];
     }
     this.fallen.fill(0);
+    this.fallStep.fill(0);
   }
 
   /**
    * Check if a robot has fallen (base z too low or tilted too much).
+   * Also disables fallen robots to save compute.
    */
-  checkFallen(robots) {
+  checkFallen(robots, currentStep) {
     for (let i = 0; i < this.populationSize; i++) {
       if (this.fallen[i]) continue;
       const addr = robots[i].baseQposAddr;
@@ -155,17 +171,25 @@ export class EvolutionController {
       const z = data.qpos[addr + 2];
       // Check if z is too low (fallen)
       const threshold = this.robotType === 'humanoid' ? 0.4 : 0.1;
-      if (z < threshold) this.fallen[i] = 1;
+      if (z < threshold) {
+        this.fallen[i] = 1;
+        this.fallStep[i] = currentStep;
+        robots[i].enabled = false; // stop computing for fallen robots
+      }
     }
   }
 
   /**
    * Evaluate fitness for all robots after evaluation period.
-   * Fitness = forward distance + upright bonus - lateral penalty
+   * Fitness = survival × (forward distance + upright bonus) + survival bonus - penalties
+   *
+   * Key insight: survival ratio gates everything. A robot that falls at 10%
+   * gets almost nothing even if it flew forward. Standing still = decent baseline.
    */
   evaluateFitness(robots) {
     let bestFit = -Infinity;
     let bestIdx = 0;
+    this.standingCount = 0;
 
     for (let i = 0; i < this.populationSize; i++) {
       const addr = robots[i].baseQposAddr;
@@ -177,21 +201,31 @@ export class EvolutionController {
       const endY = data.qpos[addr + 1];
       const endZ = data.qpos[addr + 2];
 
-      // Forward distance (in X direction, robot's initial heading)
+      // Survival: fraction of eval time the robot stayed upright (0–1)
+      const aliveSteps = this.fallen[i] ? this.fallStep[i] : this.evalSteps;
+      const survivalRatio = aliveSteps / this.evalSteps;
+
+      // Forward distance (X direction)
       const fwdDist = endX - startX;
 
       // Lateral deviation penalty
       const latDist = Math.abs(endY - startY);
 
-      // Upright bonus (higher z = more upright)
-      const uprightBonus = this.fallen[i] ? 0 : endZ * 2;
+      // Upright bonus — only if still standing
+      const uprightBonus = this.fallen[i] ? 0 : endZ * 3;
 
-      // Fitness
-      let fitness = fwdDist * 10 + uprightBonus - latDist * 2;
-      if (this.fallen[i]) fitness -= 5; // penalty for falling
+      // Survival bonus: big reward just for staying upright
+      const survivalBonus = survivalRatio * 8;
+
+      // Final fitness: survival gates the walking reward
+      let fitness = survivalRatio * (fwdDist * 10 + uprightBonus)
+                    + survivalBonus
+                    - latDist * 2;
+      if (this.fallen[i]) fitness -= 3;
 
       this.fitnesses[i] = fitness;
       if (fitness > bestFit) { bestFit = fitness; bestIdx = i; }
+      if (!this.fallen[i]) this.standingCount++;
     }
 
     this.bestFitness = bestFit;
@@ -210,24 +244,34 @@ export class EvolutionController {
       best: bestFit,
       avg: avg,
       worst: worst,
+      standing: this.standingCount,
     });
 
-    return { bestFit, bestIdx, avg, worst };
+    return { bestFit, bestIdx, avg, worst, standing: this.standingCount };
   }
 
   /**
    * Create next generation using tournament selection, crossover, and mutation.
-   * Elitism: best genome passes unchanged.
+   * Elitism: top 2 genomes pass unchanged.
+   * Fresh injection: 1 perturbed-default genome maintains diversity.
    */
   evolve() {
     const newPop = [];
 
-    // Elitism: keep the best genome unchanged
+    // Elitism: keep the best-ever genome unchanged
     if (this.bestEverGenome) {
       newPop.push([...this.bestEverGenome]);
     } else {
       newPop.push([...this.population[0]]);
     }
+
+    // Elitism: also keep current generation's best
+    if (this.bestGenome && JSON.stringify(this.bestGenome) !== JSON.stringify(newPop[0])) {
+      newPop.push([...this.bestGenome]);
+    }
+
+    // Fresh injection: one perturbed default to maintain diversity
+    newPop.push(perturbedGenome(this.geneDefs, 0.12));
 
     // Fill rest with offspring
     while (newPop.length < this.populationSize) {
@@ -235,9 +279,9 @@ export class EvolutionController {
       const parent2 = tournamentSelect(this.population, this.fitnesses);
       let child = crossover(parent1, parent2);
 
-      // Increase mutation rate in early generations for exploration
-      const mutRate = this.generation < 10 ? 0.35 : 0.2;
-      const mutStrength = this.generation < 10 ? 0.2 : 0.12;
+      // Adaptive mutation: more exploration early, refine later
+      const mutRate = this.generation < 15 ? 0.35 : 0.2;
+      const mutStrength = this.generation < 15 ? 0.18 : 0.10;
       child = mutate(child, this.geneDefs, mutRate, mutStrength);
       newPop.push(child);
     }
@@ -288,7 +332,9 @@ export class EvolutionController {
     const progress = Math.floor(this.currentStep / this.evalSteps * 100);
     const best = this.bestEverFitness > -Infinity
       ? this.bestEverFitness.toFixed(1) : '--';
-    return `Gen ${this.generation} | ${progress}% | Best: ${best}`;
+    const standing = this.standingCount !== undefined
+      ? ` | Up: ${this.standingCount}/${this.populationSize}` : '';
+    return `Gen ${this.generation} | ${progress}%${standing} | Best: ${best}`;
   }
 
   /**

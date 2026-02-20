@@ -147,10 +147,10 @@ const SCENES = {
   },
   'unitree_h1/scene_evolve': {
     controller: 'evolve',
-    numRobots: 9,
-    spacing: 3.0,
-    evalSeconds: 8,
-    camera: { pos: [6, 5, 6], target: [0, 0.9, 0] },
+    numRobots: 16,
+    spacing: 2.5,
+    evalSeconds: 12,
+    camera: { pos: [8, 6, 8], target: [0, 0.9, 0] },
   },
 };
 
