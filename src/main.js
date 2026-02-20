@@ -11,6 +11,8 @@ import { loadSceneAssets } from './assetLoader.js';
 import { Go2CpgController } from './go2CpgController.js';
 import { Go2OnnxController } from './go2OnnxController.js';
 import { H1CpgController } from './h1CpgController.js';
+import { FactoryController } from './factoryController.js';
+import { generateFactoryXML } from './factoryScene.js';
 
 // ─── DOM ────────────────────────────────────────────────────────────
 const statusEl = document.getElementById('status');
@@ -49,10 +51,11 @@ let data;
 let bodies = {};
 let mujocoRoot = null;
 
-let activeController = null; // 'go2' | 'go2rl' | 'h1' | null
+let activeController = null; // 'go2' | 'go2rl' | 'h1' | 'factory' | null
 let go2Controller = null;
 let go2RlController = null;
 let h1Controller = null;
+let factoryController = null;
 
 let paused = false;
 let cameraFollow = true;
@@ -111,6 +114,12 @@ const SCENES = {
   'unitree_h1/scene_stairs.xml': {
     controller: 'h1',
     camera: { pos: [4.0, 2.5, 3.5], target: [2.0, 0.5, 0] },
+  },
+  'unitree_go2/scene_factory': {
+    controller: 'factory',
+    numRobots: 9,
+    spacing: 1.5,
+    camera: { pos: [4, 3, 4], target: [0, 0.25, 0] },
   },
 };
 
@@ -219,22 +228,32 @@ async function loadScene(sceneKey) {
   setStatus(`Loading: ${sceneKey}`);
 
   const cfg = SCENES[sceneKey] || {};
-  // Resolve actual scene XML path (for RL scenes that reuse the same XML)
-  const scenePath = cfg.scenePath || sceneKey;
+  let loadPath;
 
-  await loadSceneAssets(mujoco, scenePath, setStatus);
-
-  currentObstacleScale = scenePath.includes('h1') ? 3.5 : 2.5;
-  const originalXml = new TextDecoder().decode(mujoco.FS.readFile('/working/' + scenePath));
-  const arenaXml = generateArenaXML(originalXml, currentObstacleScale);
-  const arenaPath = scenePath.replace('.xml', '_arena.xml');
-  mujoco.FS.writeFile('/working/' + arenaPath, arenaXml);
+  if (cfg.controller === 'factory') {
+    // Factory mode: load Go2 assets, then generate multi-robot XML
+    await loadSceneAssets(mujoco, 'unitree_go2/scene.xml', setStatus);
+    setStatus('Generating factory...');
+    const factoryXml = generateFactoryXML(mujoco, cfg.numRobots, cfg.spacing);
+    mujoco.FS.writeFile('/working/unitree_go2/scene_factory.xml', factoryXml);
+    loadPath = '/working/unitree_go2/scene_factory.xml';
+  } else {
+    // Normal mode: load assets and add arena obstacles
+    const scenePath = cfg.scenePath || sceneKey;
+    await loadSceneAssets(mujoco, scenePath, setStatus);
+    currentObstacleScale = scenePath.includes('h1') ? 3.5 : 2.5;
+    const originalXml = new TextDecoder().decode(mujoco.FS.readFile('/working/' + scenePath));
+    const arenaXml = generateArenaXML(originalXml, currentObstacleScale);
+    const arenaPath = scenePath.replace('.xml', '_arena.xml');
+    mujoco.FS.writeFile('/working/' + arenaPath, arenaXml);
+    loadPath = '/working/' + arenaPath;
+  }
 
   clearScene();
   if (data) { data.delete(); data = null; }
   if (model) { model.delete(); model = null; }
 
-  model = mujoco.MjModel.loadFromXML('/working/' + arenaPath);
+  model = mujoco.MjModel.loadFromXML(loadPath);
   data = new mujoco.MjData(model);
 
   console.log(`Model loaded: nq=${model.nq}, nv=${model.nv}, nu=${model.nu}, nbody=${model.nbody}`);
@@ -258,6 +277,7 @@ async function loadScene(sceneKey) {
   go2Controller = null;
   go2RlController = null;
   h1Controller = null;
+  factoryController = null;
   stepCounter = 0;
 
   model.opt.iterations = 30;
@@ -303,9 +323,17 @@ async function loadScene(sceneKey) {
       mujoco.mj_step(model, data);
     }
     activeController = 'h1';
+  } else if (cfg.controller === 'factory') {
+    factoryController = new FactoryController(mujoco, model, data, cfg.numRobots);
+    factoryController.enabled = true;
+    for (let i = 0; i < 200; i++) {
+      factoryController.step();
+      mujoco.mj_step(model, data);
+    }
+    activeController = 'factory';
   }
 
-  findObstacleIndices();
+  if (cfg.controller !== 'factory') findObstacleIndices();
   nextBall = 0;
   nextBox = 0;
   updateControllerBtn();
@@ -316,7 +344,7 @@ async function loadScene(sceneKey) {
   }
   controls.update();
 
-  currentScenePath = scenePath;
+  currentScenePath = sceneKey;
   currentSceneKey = sceneKey;
   setStatus(`Ready: ${sceneKey.split('/').pop()}`);
 }
@@ -331,6 +359,9 @@ function updateControllerBtn() {
     controllerBtn.style.display = '';
   } else if (activeController === 'h1') {
     controllerBtn.textContent = h1Controller?.enabled ? 'CPG: ON' : 'CPG: OFF';
+    controllerBtn.style.display = '';
+  } else if (activeController === 'factory') {
+    controllerBtn.textContent = factoryController?.enabled ? `CPG: ON (${factoryController.numRobots}x)` : 'CPG: OFF';
     controllerBtn.style.display = '';
   } else {
     controllerBtn.style.display = 'none';
@@ -375,6 +406,14 @@ function resetScene() {
       mujoco.mj_step(model, data);
     }
   }
+  if (factoryController) {
+    factoryController.reset();
+    factoryController.enabled = true;
+    for (let i = 0; i < 200; i++) {
+      factoryController.step();
+      mujoco.mj_step(model, data);
+    }
+  }
   updateControllerBtn();
 }
 
@@ -385,6 +424,8 @@ function toggleController() {
     go2RlController.enabled = !go2RlController.enabled;
   } else if (activeController === 'h1' && h1Controller) {
     h1Controller.enabled = !h1Controller.enabled;
+  } else if (activeController === 'factory' && factoryController) {
+    factoryController.enabled = !factoryController.enabled;
   }
   updateControllerBtn();
 }
@@ -434,6 +475,9 @@ function handleInput() {
   }
   if (activeController === 'h1' && h1Controller && h1Controller.enabled) {
     h1Controller.setCommand(fwd, lat, turn);
+  }
+  if (activeController === 'factory' && factoryController && factoryController.enabled) {
+    factoryController.setCommand(fwd, lat, turn);
   }
 }
 
@@ -493,7 +537,8 @@ function updateBodies() {
 
 function followCamera() {
   if (!cameraFollow || !model || !data) return;
-  const rootBody = 1;
+  const rootBody = (activeController === 'factory' && factoryController)
+    ? factoryController.centerBodyId : 1;
   const x = data.xpos[rootBody * 3 + 0];
   const y = data.xpos[rootBody * 3 + 1];
   const z = data.xpos[rootBody * 3 + 2];
@@ -609,6 +654,7 @@ function setupControls() {
         if (activeController === 'go2' && go2Controller) go2Controller.step();
         if (activeController === 'go2rl' && go2RlController) go2RlController.step();
         if (activeController === 'h1' && h1Controller) h1Controller.step();
+        if (activeController === 'factory' && factoryController) factoryController.step();
         mujoco.mj_step(model, data);
         stepCounter++;
       }

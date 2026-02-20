@@ -29034,6 +29034,308 @@ var H1CpgController = class {
   }
 };
 
+// src/factoryController.js
+var SingleRobotCPG = class {
+  constructor(mujoco2, model2, data2, prefix, index) {
+    this.mujoco = mujoco2;
+    this.model = model2;
+    this.data = data2;
+    this.prefix = prefix;
+    this.index = index;
+    this.enabled = false;
+    this.simDt = model2.opt.timestep || 2e-3;
+    this.frequency = 2.5;
+    this.phase = Math.random() * Math.PI * 2;
+    this.thighAmp = 0.25;
+    this.calfAmp = 0.25;
+    this.hipAmp = 0.04;
+    this.hipKp = 120;
+    this.hipKd = 4;
+    this.thighKp = 200;
+    this.thighKd = 6;
+    this.calfKp = 250;
+    this.calfKd = 8;
+    this.balanceKp = 60;
+    this.balanceKd = 5;
+    this.homeHip = 0;
+    this.homeThigh = 0.9;
+    this.homeCalf = -1.8;
+    this.forwardSpeed = 0;
+    this.lateralSpeed = 0;
+    this.turnRate = 0;
+    this.prevPitch = 0;
+    this.prevRoll = 0;
+    this.baseQposAddr = 0;
+    this.actBase = index * 12;
+    this.jntQpos = {};
+    this.jntDof = {};
+    this.findIndices();
+  }
+  findIndices() {
+    const p = this.prefix;
+    try {
+      const fjId = this.mujoco.mj_name2id(this.model, 3, `${p}freejoint`);
+      if (fjId >= 0) {
+        this.baseQposAddr = this.model.jnt_qposadr[fjId];
+      }
+    } catch (e) {
+    }
+    const suffixes = [
+      "FL_hip_joint",
+      "FL_thigh_joint",
+      "FL_calf_joint",
+      "FR_hip_joint",
+      "FR_thigh_joint",
+      "FR_calf_joint",
+      "RL_hip_joint",
+      "RL_thigh_joint",
+      "RL_calf_joint",
+      "RR_hip_joint",
+      "RR_thigh_joint",
+      "RR_calf_joint"
+    ];
+    for (const s of suffixes) {
+      const name = `${p}${s}`;
+      try {
+        const jid = this.mujoco.mj_name2id(this.model, 3, name);
+        if (jid >= 0) {
+          this.jntQpos[name] = this.model.jnt_qposadr[jid];
+          this.jntDof[name] = this.model.jnt_dofadr[jid];
+        }
+      } catch (e) {
+      }
+    }
+  }
+  getTrunkOrientation() {
+    const a = this.baseQposAddr;
+    const qw = this.data.qpos[a + 3];
+    const qx = this.data.qpos[a + 4];
+    const qy = this.data.qpos[a + 5];
+    const qz = this.data.qpos[a + 6];
+    const sinp = 2 * (qw * qy - qz * qx);
+    const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp) * Math.PI / 2 : Math.asin(sinp);
+    const roll = Math.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy));
+    return { pitch, roll };
+  }
+  pdTorque(jointName, target, kp, kd) {
+    const qIdx = this.jntQpos[jointName];
+    const dIdx = this.jntDof[jointName];
+    if (qIdx === void 0) return 0;
+    const q = this.data.qpos[qIdx];
+    const qdot = this.data.qvel[dIdx] || 0;
+    return kp * (target - q) - kd * qdot;
+  }
+  setCommand(forward, lateral, turn) {
+    this.forwardSpeed = Math.max(-1, Math.min(1, forward));
+    this.lateralSpeed = Math.max(-0.5, Math.min(0.5, lateral));
+    this.turnRate = Math.max(-1, Math.min(1, turn));
+  }
+  step() {
+    if (!this.enabled) return;
+    this.phase += 2 * Math.PI * this.frequency * this.simDt;
+    if (this.phase > 2 * Math.PI) this.phase -= 2 * Math.PI;
+    const ampScale = Math.abs(this.forwardSpeed);
+    const direction = Math.sign(this.forwardSpeed) || 1;
+    const { pitch, roll } = this.getTrunkOrientation();
+    const pitchRate = (pitch - this.prevPitch) / this.simDt;
+    const rollRate = (roll - this.prevRoll) / this.simDt;
+    this.prevPitch = pitch;
+    this.prevRoll = roll;
+    const pitchCorr = -this.balanceKp * pitch - this.balanceKd * pitchRate;
+    const rollCorr = -this.balanceKp * roll - this.balanceKd * rollRate;
+    const ctrl = this.data.ctrl;
+    const base = this.actBase;
+    const p = this.prefix;
+    const legs = [
+      [0, 0, 1, "FL", true],
+      [3, Math.PI, -1, "FR", true],
+      [6, Math.PI, 1, "RL", false],
+      [9, 0, -1, "RR", false]
+    ];
+    for (const [actOff, legPhaseOff, side, legName, isFront] of legs) {
+      const legPhase = this.phase + legPhaseOff;
+      const swing = Math.sin(legPhase);
+      const isSwing = swing > 0;
+      const turnSign = isFront ? 1 : -1;
+      const thighTarget = this.homeThigh - direction * this.thighAmp * ampScale * swing + this.turnRate * 0.06 * turnSign * side;
+      const calfTarget = this.homeCalf - this.calfAmp * ampScale * (isSwing ? Math.sin(legPhase) : 0);
+      const hipTarget = this.homeHip + side * this.hipAmp * (isSwing ? 1 : -1) * ampScale + this.lateralSpeed * 0.08 * side;
+      const hipJoint = `${p}${legName}_hip_joint`;
+      const thighJoint = `${p}${legName}_thigh_joint`;
+      const calfJoint = `${p}${legName}_calf_joint`;
+      ctrl[base + actOff + 0] = this.pdTorque(hipJoint, hipTarget, this.hipKp, this.hipKd);
+      ctrl[base + actOff + 1] = this.pdTorque(thighJoint, thighTarget, this.thighKp, this.thighKd);
+      ctrl[base + actOff + 2] = this.pdTorque(calfJoint, calfTarget, this.calfKp, this.calfKd);
+      ctrl[base + actOff + 1] += pitchCorr * 0.2;
+      ctrl[base + actOff + 0] += rollCorr * 0.15 * side;
+    }
+    const ctrlRange = this.model.actuator_ctrlrange;
+    if (ctrlRange) {
+      for (let i = 0; i < 12; i++) {
+        const idx = base + i;
+        const lo = ctrlRange[idx * 2];
+        const hi = ctrlRange[idx * 2 + 1];
+        ctrl[idx] = Math.max(lo, Math.min(hi, ctrl[idx]));
+      }
+    }
+  }
+  reset() {
+    this.phase = Math.random() * Math.PI * 2;
+    this.prevPitch = 0;
+    this.prevRoll = 0;
+    this.forwardSpeed = 0;
+    this.lateralSpeed = 0;
+    this.turnRate = 0;
+  }
+};
+var FactoryController = class {
+  constructor(mujoco2, model2, data2, numRobots) {
+    this.mujoco = mujoco2;
+    this.model = model2;
+    this.data = data2;
+    this.numRobots = numRobots;
+    this.enabled = false;
+    this.robots = [];
+    const centerIdx = Math.floor(numRobots / 2);
+    try {
+      this.centerBodyId = mujoco2.mj_name2id(model2, 1, `r${centerIdx}_base`);
+    } catch (e) {
+      this.centerBodyId = 1;
+    }
+    for (let i = 0; i < numRobots; i++) {
+      const robot = new SingleRobotCPG(mujoco2, model2, data2, `r${i}_`, i);
+      this.robots.push(robot);
+    }
+  }
+  setCommand(forward, lateral, turn) {
+    for (const robot of this.robots) {
+      robot.setCommand(forward, lateral, turn);
+    }
+  }
+  step() {
+    if (!this.enabled) return;
+    for (const robot of this.robots) {
+      robot.enabled = true;
+      robot.step();
+    }
+  }
+  reset() {
+    for (const robot of this.robots) {
+      robot.reset();
+    }
+  }
+};
+
+// src/factoryScene.js
+function prefixNames(xml, p) {
+  const names = [
+    "FL_thigh_joint",
+    "FR_thigh_joint",
+    "RL_thigh_joint",
+    "RR_thigh_joint",
+    "FL_calf_joint",
+    "FR_calf_joint",
+    "RL_calf_joint",
+    "RR_calf_joint",
+    "FL_hip_joint",
+    "FR_hip_joint",
+    "RL_hip_joint",
+    "RR_hip_joint",
+    "FL_thigh",
+    "FR_thigh",
+    "RL_thigh",
+    "RR_thigh",
+    "FL_calf",
+    "FR_calf",
+    "RL_calf",
+    "RR_calf",
+    "FL_hip",
+    "FR_hip",
+    "RL_hip",
+    "RR_hip",
+    "base",
+    "imu",
+    "FL",
+    "FR",
+    "RL",
+    "RR"
+  ];
+  for (const name of names) {
+    xml = xml.replaceAll(`name="${name}"`, `name="${p}${name}"`);
+    xml = xml.replaceAll(`joint="${name}"`, `joint="${p}${name}"`);
+  }
+  xml = xml.replace("<freejoint/>", `<freejoint name="${p}freejoint"/>`);
+  return xml;
+}
+function generateFactoryXML(mujoco2, numRobots, spacing) {
+  const go2Xml = new TextDecoder().decode(
+    mujoco2.FS.readFile("/working/unitree_go2/go2.xml")
+  );
+  const defaultStart = go2Xml.indexOf("<default>");
+  const defaultEnd = go2Xml.lastIndexOf("</default>") + "</default>".length;
+  const defaultSection = go2Xml.substring(defaultStart, defaultEnd);
+  const assetStart = go2Xml.indexOf("<asset>") + "<asset>".length;
+  const assetEnd = go2Xml.indexOf("</asset>");
+  const assetContent = go2Xml.substring(assetStart, assetEnd);
+  const wbStart = go2Xml.indexOf("<worldbody>") + "<worldbody>".length;
+  const wbEnd = go2Xml.indexOf("</worldbody>");
+  const robotBodyXml = go2Xml.substring(wbStart, wbEnd).trim();
+  const actStart = go2Xml.indexOf("<actuator>") + "<actuator>".length;
+  const actEnd = go2Xml.indexOf("</actuator>");
+  const robotActXml = go2Xml.substring(actStart, actEnd).trim();
+  const cols = Math.ceil(Math.sqrt(numRobots));
+  const rows = Math.ceil(numRobots / cols);
+  let allBodies = "";
+  let allActuators = "";
+  const qposValues = [];
+  const ctrlValues = [];
+  for (let i = 0; i < numRobots; i++) {
+    const row = Math.floor(i / cols);
+    const col = i % cols;
+    const x = (col - (cols - 1) / 2) * spacing;
+    const y = (row - (rows - 1) / 2) * spacing;
+    const prefix = `r${i}_`;
+    let body = prefixNames(robotBodyXml, prefix);
+    body = body.replace('pos="0 0 0.445"', `pos="${x.toFixed(2)} ${y.toFixed(2)} 0.445"`);
+    allBodies += "    " + body + "\n";
+    allActuators += "    " + prefixNames(robotActXml, prefix) + "\n";
+    qposValues.push(
+      `${x.toFixed(2)} ${y.toFixed(2)} 0.27 1 0 0 0 0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8`
+    );
+    ctrlValues.push("0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8");
+  }
+  return `<mujoco model="go2 factory">
+  <compiler angle="radian" meshdir="assets" autolimits="true"/>
+  <option cone="elliptic" impratio="100"/>
+
+  ${defaultSection}
+
+  <asset>
+    ${assetContent}
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+      markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 3" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+${allBodies}
+  </worldbody>
+
+  <actuator>
+${allActuators}
+  </actuator>
+
+  <keyframe>
+    <key name="home"
+      qpos="${qposValues.join(" ")}"
+      ctrl="${ctrlValues.join(" ")}"/>
+  </keyframe>
+</mujoco>`;
+}
+
 // src/main.js
 var statusEl = document.getElementById("status");
 var sceneSelect = document.getElementById("scene-select");
@@ -29068,6 +29370,7 @@ var activeController = null;
 var go2Controller = null;
 var go2RlController = null;
 var h1Controller = null;
+var factoryController = null;
 var paused = false;
 var cameraFollow = true;
 var simSpeed = 1;
@@ -29115,6 +29418,12 @@ var SCENES = {
   "unitree_h1/scene_stairs.xml": {
     controller: "h1",
     camera: { pos: [4, 2.5, 3.5], target: [2, 0.5, 0] }
+  },
+  "unitree_go2/scene_factory": {
+    controller: "factory",
+    numRobots: 9,
+    spacing: 1.5,
+    camera: { pos: [4, 3, 4], target: [0, 0.25, 0] }
   }
 };
 var currentScenePath = "unitree_go2/scene.xml";
@@ -29208,13 +29517,23 @@ function clearScene() {
 async function loadScene(sceneKey) {
   setStatus(`Loading: ${sceneKey}`);
   const cfg = SCENES[sceneKey] || {};
-  const scenePath = cfg.scenePath || sceneKey;
-  await loadSceneAssets(mujoco, scenePath, setStatus);
-  currentObstacleScale = scenePath.includes("h1") ? 3.5 : 2.5;
-  const originalXml = new TextDecoder().decode(mujoco.FS.readFile("/working/" + scenePath));
-  const arenaXml = generateArenaXML(originalXml, currentObstacleScale);
-  const arenaPath = scenePath.replace(".xml", "_arena.xml");
-  mujoco.FS.writeFile("/working/" + arenaPath, arenaXml);
+  let loadPath;
+  if (cfg.controller === "factory") {
+    await loadSceneAssets(mujoco, "unitree_go2/scene.xml", setStatus);
+    setStatus("Generating factory...");
+    const factoryXml = generateFactoryXML(mujoco, cfg.numRobots, cfg.spacing);
+    mujoco.FS.writeFile("/working/unitree_go2/scene_factory.xml", factoryXml);
+    loadPath = "/working/unitree_go2/scene_factory.xml";
+  } else {
+    const scenePath = cfg.scenePath || sceneKey;
+    await loadSceneAssets(mujoco, scenePath, setStatus);
+    currentObstacleScale = scenePath.includes("h1") ? 3.5 : 2.5;
+    const originalXml = new TextDecoder().decode(mujoco.FS.readFile("/working/" + scenePath));
+    const arenaXml = generateArenaXML(originalXml, currentObstacleScale);
+    const arenaPath = scenePath.replace(".xml", "_arena.xml");
+    mujoco.FS.writeFile("/working/" + arenaPath, arenaXml);
+    loadPath = "/working/" + arenaPath;
+  }
   clearScene();
   if (data) {
     data.delete();
@@ -29224,7 +29543,7 @@ async function loadScene(sceneKey) {
     model.delete();
     model = null;
   }
-  model = mujoco.MjModel.loadFromXML("/working/" + arenaPath);
+  model = mujoco.MjModel.loadFromXML(loadPath);
   data = new mujoco.MjData(model);
   console.log(`Model loaded: nq=${model.nq}, nv=${model.nv}, nu=${model.nu}, nbody=${model.nbody}`);
   if (model.nkey > 0) {
@@ -29241,6 +29560,7 @@ async function loadScene(sceneKey) {
   go2Controller = null;
   go2RlController = null;
   h1Controller = null;
+  factoryController = null;
   stepCounter = 0;
   model.opt.iterations = 30;
   if (cfg.controller === "go2") {
@@ -29282,8 +29602,16 @@ async function loadScene(sceneKey) {
       mujoco.mj_step(model, data);
     }
     activeController = "h1";
+  } else if (cfg.controller === "factory") {
+    factoryController = new FactoryController(mujoco, model, data, cfg.numRobots);
+    factoryController.enabled = true;
+    for (let i = 0; i < 200; i++) {
+      factoryController.step();
+      mujoco.mj_step(model, data);
+    }
+    activeController = "factory";
   }
-  findObstacleIndices();
+  if (cfg.controller !== "factory") findObstacleIndices();
   nextBall = 0;
   nextBox = 0;
   updateControllerBtn();
@@ -29292,7 +29620,7 @@ async function loadScene(sceneKey) {
     controls.target.set(...cfg.camera.target);
   }
   controls.update();
-  currentScenePath = scenePath;
+  currentScenePath = sceneKey;
   currentSceneKey = sceneKey;
   setStatus(`Ready: ${sceneKey.split("/").pop()}`);
 }
@@ -29306,6 +29634,9 @@ function updateControllerBtn() {
     controllerBtn.style.display = "";
   } else if (activeController === "h1") {
     controllerBtn.textContent = h1Controller?.enabled ? "CPG: ON" : "CPG: OFF";
+    controllerBtn.style.display = "";
+  } else if (activeController === "factory") {
+    controllerBtn.textContent = factoryController?.enabled ? `CPG: ON (${factoryController.numRobots}x)` : "CPG: OFF";
     controllerBtn.style.display = "";
   } else {
     controllerBtn.style.display = "none";
@@ -29346,6 +29677,14 @@ function resetScene() {
       mujoco.mj_step(model, data);
     }
   }
+  if (factoryController) {
+    factoryController.reset();
+    factoryController.enabled = true;
+    for (let i = 0; i < 200; i++) {
+      factoryController.step();
+      mujoco.mj_step(model, data);
+    }
+  }
   updateControllerBtn();
 }
 function toggleController() {
@@ -29355,6 +29694,8 @@ function toggleController() {
     go2RlController.enabled = !go2RlController.enabled;
   } else if (activeController === "h1" && h1Controller) {
     h1Controller.enabled = !h1Controller.enabled;
+  } else if (activeController === "factory" && factoryController) {
+    factoryController.enabled = !factoryController.enabled;
   }
   updateControllerBtn();
 }
@@ -29394,6 +29735,9 @@ function handleInput() {
   }
   if (activeController === "h1" && h1Controller && h1Controller.enabled) {
     h1Controller.setCommand(fwd, lat, turn);
+  }
+  if (activeController === "factory" && factoryController && factoryController.enabled) {
+    factoryController.setCommand(fwd, lat, turn);
   }
 }
 window.addEventListener("keydown", (e) => {
@@ -29455,7 +29799,7 @@ function updateBodies() {
 }
 function followCamera() {
   if (!cameraFollow || !model || !data) return;
-  const rootBody = 1;
+  const rootBody = activeController === "factory" && factoryController ? factoryController.centerBodyId : 1;
   const x = data.xpos[rootBody * 3 + 0];
   const y = data.xpos[rootBody * 3 + 1];
   const z = data.xpos[rootBody * 3 + 2];
@@ -29574,6 +29918,7 @@ function setupControls() {
         if (activeController === "go2" && go2Controller) go2Controller.step();
         if (activeController === "go2rl" && go2RlController) go2RlController.step();
         if (activeController === "h1" && h1Controller) h1Controller.step();
+        if (activeController === "factory" && factoryController) factoryController.step();
         mujoco.mj_step(model, data);
         stepCounter++;
       }
