@@ -276,9 +276,11 @@ async function loadScene(sceneKey) {
     setStatus('Loading RL policy...');
     const loaded = await go2RlController.loadModel(cfg.onnxModel);
     if (loaded) {
+      // Set initial pose to IsaacLab defaults (thigh=1.1 instead of keyframe 0.9)
+      go2RlController.setInitialPose();
       go2RlController.enabled = true;
-      // Warm-up: PD hold at default pose, then run policy
-      for (let i = 0; i < 200; i++) {
+      // Warm-up: PD hold at default pose to settle contacts
+      for (let i = 0; i < 500; i++) {
         go2RlController.applyPD();
         mujoco.mj_step(model, data);
       }

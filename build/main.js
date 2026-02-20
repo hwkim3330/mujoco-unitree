@@ -28531,8 +28531,8 @@ var Go2OnnxController = class {
     this.simDt = model2.opt.timestep || 2e-3;
     this.decimation = 10;
     this.stepCount = 0;
-    this.Kp = 25;
-    this.Kd = 0.5;
+    this.Kp = 50;
+    this.Kd = 1.5;
     this.actionScale = 0.25;
     this.defaultPos = new Float32Array([
       0,
@@ -28551,6 +28551,24 @@ var Go2OnnxController = class {
       -1.8
       // calfs
     ]);
+    this.defaultPosMJ = new Float32Array([
+      0,
+      1.1,
+      -1.8,
+      // FL
+      0,
+      1.1,
+      -1.8,
+      // FR
+      0,
+      1.1,
+      -1.8,
+      // RL
+      0,
+      1.1,
+      -1.8
+      // RR
+    ]);
     this.MJ_TO_IL = [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8, 11];
     this.IL_TO_MJ = [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8, 11];
     this.lastAction = new Float32Array(12);
@@ -28565,6 +28583,7 @@ var Go2OnnxController = class {
     this.footGeomIds = [-1, -1, -1, -1];
     this.floorGeomId = -1;
     this.findFootGeoms();
+    this._inferring = false;
   }
   findJointIndices() {
     const jointNames = [
@@ -28626,8 +28645,17 @@ var Go2OnnxController = class {
     this.turnRate = Math.max(-1, Math.min(1, turn));
   }
   /**
-   * Get body angular velocity in body frame.
+   * Set initial joint positions to IsaacLab defaults.
+   * Call before warm-up so the robot starts in the pose the policy expects.
    */
+  setInitialPose() {
+    for (let i = 0; i < 12; i++) {
+      this.data.qpos[this.jntQpos[i]] = this.defaultPosMJ[i];
+    }
+    this.data.qpos[2] = 0.35;
+    for (let i = 0; i < this.model.nv; i++) this.data.qvel[i] = 0;
+    this.mujoco.mj_forward(this.model, this.data);
+  }
   getBodyAngVel() {
     const wx = this.data.qvel[3];
     const wy = this.data.qvel[4];
@@ -28638,9 +28666,6 @@ var Go2OnnxController = class {
     const qz = this.data.qpos[6];
     return this.rotateByInvQuat(wx, wy, wz, qw, qx, qy, qz);
   }
-  /**
-   * Project gravity into body frame.
-   */
   getProjectedGravity() {
     const qw = this.data.qpos[3];
     const qx = this.data.qpos[4];
@@ -28648,9 +28673,6 @@ var Go2OnnxController = class {
     const qz = this.data.qpos[6];
     return this.rotateByInvQuat(0, 0, -1, qw, qx, qy, qz);
   }
-  /**
-   * Rotate vector (vx,vy,vz) by inverse of quaternion (qw,qx,qy,qz).
-   */
   rotateByInvQuat(vx, vy, vz, qw, qx, qy, qz) {
     const iqx = -qx, iqy = -qy, iqz = -qz;
     const tx = 2 * (iqy * vz - iqz * vy);
@@ -28662,16 +28684,12 @@ var Go2OnnxController = class {
       vz + qw * tz + (iqx * ty - iqy * tx)
     ];
   }
-  /**
-   * Detect binary foot contacts (1 if foot touches floor, 0 otherwise).
-   * Returns [FL, FR, RL, RR].
-   */
   getFootContacts() {
     const contacts = [0, 0, 0, 0];
-    const ncon = this.data.ncon || 0;
-    for (let c = 0; c < ncon; c++) {
+    for (let c = 0; c < 100; c++) {
       try {
         const contact = this.data.contact.get(c);
+        if (!contact) break;
         const g1 = contact.geom1;
         const g2 = contact.geom2;
         const isFloor1 = g1 === this.floorGeomId;
@@ -28679,9 +28697,7 @@ var Go2OnnxController = class {
         if (!isFloor1 && !isFloor2) continue;
         const otherGeom = isFloor1 ? g2 : g1;
         for (let f = 0; f < 4; f++) {
-          if (otherGeom === this.footGeomIds[f]) {
-            contacts[f] = 1;
-          }
+          if (otherGeom === this.footGeomIds[f]) contacts[f] = 1;
         }
       } catch (e) {
         break;
@@ -28689,9 +28705,6 @@ var Go2OnnxController = class {
     }
     return contacts;
   }
-  /**
-   * Build the 49-dim observation vector.
-   */
   buildObs() {
     const obs = new Float32Array(49);
     const angVel = this.getBodyAngVel();
@@ -28722,12 +28735,11 @@ var Go2OnnxController = class {
     for (let i = 0; i < 12; i++) {
       obs[37 + i] = this.lastAction[i];
     }
+    for (let i = 0; i < 49; i++) {
+      obs[i] = Math.max(-100, Math.min(100, obs[i]));
+    }
     return obs;
   }
-  /**
-   * Apply PD control to track current position targets.
-   * Called every physics step.
-   */
   applyPD() {
     const ctrl = this.data.ctrl;
     for (let i = 0; i < 12; i++) {
@@ -28746,11 +28758,6 @@ var Go2OnnxController = class {
       }
     }
   }
-  /**
-   * Main step function. Called every physics step (synchronous).
-   * Runs policy at decimated rate (async, fire-and-forget).
-   * Applies PD every step using latest targets.
-   */
   step() {
     if (!this.enabled) return;
     this.applyPD();
@@ -28767,8 +28774,9 @@ var Go2OnnxController = class {
       const results = await this.session.run({ obs: input });
       const actions = results.actions.data;
       for (let i = 0; i < 12; i++) {
-        this.lastAction[i] = actions[i];
-        this.currentTargets[i] = actions[i] * this.actionScale + this.defaultPos[i];
+        const a = Math.max(-5, Math.min(5, actions[i]));
+        this.lastAction[i] = a;
+        this.currentTargets[i] = a * this.actionScale + this.defaultPos[i];
       }
     } catch (e) {
       console.error("ONNX inference error:", e);
@@ -28784,6 +28792,7 @@ var Go2OnnxController = class {
     this.forwardSpeed = 0;
     this.lateralSpeed = 0;
     this.turnRate = 0;
+    this._inferring = false;
   }
 };
 
@@ -29248,8 +29257,9 @@ async function loadScene(sceneKey) {
     setStatus("Loading RL policy...");
     const loaded2 = await go2RlController.loadModel(cfg.onnxModel);
     if (loaded2) {
+      go2RlController.setInitialPose();
       go2RlController.enabled = true;
-      for (let i = 0; i < 200; i++) {
+      for (let i = 0; i < 500; i++) {
         go2RlController.applyPD();
         mujoco.mj_step(model, data);
       }
@@ -29586,4 +29596,3 @@ three/build/three.module.js:
    * SPDX-License-Identifier: MIT
    *)
 */
-//# sourceMappingURL=main.js.map

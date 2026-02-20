@@ -25,6 +25,9 @@
  *   FR_hip(3), FR_thigh(4), FR_calf(5),
  *   RL_hip(6), RL_thigh(7), RL_calf(8),
  *   RR_hip(9), RR_thigh(10), RR_calf(11)
+ *
+ * PD gains: Kp=50, Kd=1.5 — matches unitree_mujoco real-robot deployment
+ * (Kp=50, Kd=3.5 in SDK, minus MuJoCo model's built-in joint damping=2).
  */
 
 export class Go2OnnxController {
@@ -33,7 +36,7 @@ export class Go2OnnxController {
     this.model = model;
     this.data = data;
     this.enabled = false;
-    this.session = null; // ONNX session
+    this.session = null;
 
     this.simDt = model.opt.timestep || 0.002;
 
@@ -41,32 +44,37 @@ export class Go2OnnxController {
     this.decimation = 10;
     this.stepCount = 0;
 
-    // PD gains (IsaacLab standard for Go2)
-    this.Kp = 25.0;
-    this.Kd = 0.5;
+    // PD gains — matched to unitree_mujoco deployment (Kp=50, Kd=3.5)
+    // MuJoCo model has built-in joint damping=2, so we use Kd=1.5 → effective Kd≈3.5
+    this.Kp = 50.0;
+    this.Kd = 1.5;
 
-    // Action scale
+    // Action scale (from IsaacLab training config)
     this.actionScale = 0.25;
 
     // IsaacLab default joint positions (IL order)
-    // FL_hip, FR_hip, RL_hip, RR_hip, FL_thigh, FR_thigh, RL_thigh, RR_thigh, FL_calf, FR_calf, RL_calf, RR_calf
     this.defaultPos = new Float32Array([
-      0, 0, 0, 0,         // hips
-      1.1, 1.1, 1.1, 1.1, // thighs
-      -1.8, -1.8, -1.8, -1.8, // calfs
+      0, 0, 0, 0,                     // hips
+      1.1, 1.1, 1.1, 1.1,             // thighs
+      -1.8, -1.8, -1.8, -1.8,         // calfs
+    ]);
+
+    // MuJoCo-ordered defaults (for setting initial pose)
+    // MJ order: FL_hip, FL_thigh, FL_calf, FR_hip, FR_thigh, FR_calf, ...
+    this.defaultPosMJ = new Float32Array([
+      0, 1.1, -1.8,    // FL
+      0, 1.1, -1.8,    // FR
+      0, 1.1, -1.8,    // RL
+      0, 1.1, -1.8,    // RR
     ]);
 
     // MuJoCo→IsaacLab index mapping
-    // IL[i] gets its value from MuJoCo joint at MJ_TO_IL[i]
     this.MJ_TO_IL = [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8, 11];
-
-    // IsaacLab→MuJoCo ctrl mapping (same structure)
-    // IL action[i] maps to MuJoCo ctrl[IL_TO_MJ[i]]
     this.IL_TO_MJ = [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8, 11];
 
     // State
-    this.lastAction = new Float32Array(12); // Previous raw actions
-    this.currentTargets = new Float32Array(12); // Current position targets (IL order)
+    this.lastAction = new Float32Array(12);
+    this.currentTargets = new Float32Array(12);
     for (let i = 0; i < 12; i++) this.currentTargets[i] = this.defaultPos[i];
 
     // Commands
@@ -75,14 +83,16 @@ export class Go2OnnxController {
     this.turnRate = 0;
 
     // Joint indices (qpos/qvel)
-    this.jntQpos = new Int32Array(12); // MuJoCo qpos indices for each MJ joint
-    this.jntDof = new Int32Array(12);  // MuJoCo qvel indices for each MJ joint
+    this.jntQpos = new Int32Array(12);
+    this.jntDof = new Int32Array(12);
     this.findJointIndices();
 
     // Foot geom IDs for contact detection
-    this.footGeomIds = [-1, -1, -1, -1]; // FL, FR, RL, RR
+    this.footGeomIds = [-1, -1, -1, -1];
     this.floorGeomId = -1;
     this.findFootGeoms();
+
+    this._inferring = false;
   }
 
   findJointIndices() {
@@ -104,11 +114,10 @@ export class Go2OnnxController {
   }
 
   findFootGeoms() {
-    // Go2 foot geoms are named "FL", "FR", "RL", "RR" (class="foot")
     const footGeomNames = ['FL', 'FR', 'RL', 'RR'];
     for (let i = 0; i < 4; i++) {
       try {
-        const gid = this.mujoco.mj_name2id(this.model, 5, footGeomNames[i]); // mjOBJ_GEOM=5
+        const gid = this.mujoco.mj_name2id(this.model, 5, footGeomNames[i]);
         if (gid >= 0) this.footGeomIds[i] = gid;
       } catch (e) { /* ignore */ }
     }
@@ -139,51 +148,44 @@ export class Go2OnnxController {
   }
 
   /**
-   * Get body angular velocity in body frame.
+   * Set initial joint positions to IsaacLab defaults.
+   * Call before warm-up so the robot starts in the pose the policy expects.
    */
+  setInitialPose() {
+    for (let i = 0; i < 12; i++) {
+      this.data.qpos[this.jntQpos[i]] = this.defaultPosMJ[i];
+    }
+    // Set body height slightly higher to let it settle
+    this.data.qpos[2] = 0.35;
+    // Reset velocities
+    for (let i = 0; i < this.model.nv; i++) this.data.qvel[i] = 0;
+    this.mujoco.mj_forward(this.model, this.data);
+  }
+
   getBodyAngVel() {
-    // Free joint: qvel[0:3]=linear vel (world), qvel[3:6]=angular vel (world)
     const wx = this.data.qvel[3];
     const wy = this.data.qvel[4];
     const wz = this.data.qvel[5];
-
-    // Rotate world angular velocity to body frame using inverse quaternion
     const qw = this.data.qpos[3];
     const qx = this.data.qpos[4];
     const qy = this.data.qpos[5];
     const qz = this.data.qpos[6];
-
-    // Inverse quaternion rotation: q* v q
-    // For inv(q) = [qw, -qx, -qy, -qz]
     return this.rotateByInvQuat(wx, wy, wz, qw, qx, qy, qz);
   }
 
-  /**
-   * Project gravity into body frame.
-   */
   getProjectedGravity() {
     const qw = this.data.qpos[3];
     const qx = this.data.qpos[4];
     const qy = this.data.qpos[5];
     const qz = this.data.qpos[6];
-
-    // Gravity in world frame: [0, 0, -1] (normalized)
     return this.rotateByInvQuat(0, 0, -1, qw, qx, qy, qz);
   }
 
-  /**
-   * Rotate vector (vx,vy,vz) by inverse of quaternion (qw,qx,qy,qz).
-   */
   rotateByInvQuat(vx, vy, vz, qw, qx, qy, qz) {
-    // Inverse quaternion: conjugate for unit quaternion
     const iqx = -qx, iqy = -qy, iqz = -qz;
-
-    // t = 2 * cross(q_xyz, v)
     const tx = 2 * (iqy * vz - iqz * vy);
     const ty = 2 * (iqz * vx - iqx * vz);
     const tz = 2 * (iqx * vy - iqy * vx);
-
-    // result = v + qw * t + cross(q_xyz, t)
     return [
       vx + qw * tx + (iqy * tz - iqz * ty),
       vy + qw * ty + (iqz * tx - iqx * tz),
@@ -191,41 +193,29 @@ export class Go2OnnxController {
     ];
   }
 
-  /**
-   * Detect binary foot contacts (1 if foot touches floor, 0 otherwise).
-   * Returns [FL, FR, RL, RR].
-   */
   getFootContacts() {
-    const contacts = [0, 0, 0, 0]; // FL, FR, RL, RR
-
-    const ncon = this.data.ncon || 0;
-    for (let c = 0; c < ncon; c++) {
+    const contacts = [0, 0, 0, 0];
+    // Use try-catch loop since data.ncon might not be available in WASM
+    for (let c = 0; c < 100; c++) {
       try {
         const contact = this.data.contact.get(c);
+        if (!contact) break;
         const g1 = contact.geom1;
         const g2 = contact.geom2;
 
-        // Check if one geom is floor
         const isFloor1 = g1 === this.floorGeomId;
         const isFloor2 = g2 === this.floorGeomId;
         if (!isFloor1 && !isFloor2) continue;
 
         const otherGeom = isFloor1 ? g2 : g1;
-
-        // Check if the other geom is a foot
         for (let f = 0; f < 4; f++) {
-          if (otherGeom === this.footGeomIds[f]) {
-            contacts[f] = 1;
-          }
+          if (otherGeom === this.footGeomIds[f]) contacts[f] = 1;
         }
       } catch (e) { break; }
     }
     return contacts;
   }
 
-  /**
-   * Build the 49-dim observation vector.
-   */
   buildObs() {
     const obs = new Float32Array(49);
 
@@ -248,7 +238,7 @@ export class Go2OnnxController {
 
     // [9:21] Joint positions - defaults (IL order)
     for (let i = 0; i < 12; i++) {
-      const mjIdx = this.MJ_TO_IL[i]; // MuJoCo joint index for IL position i
+      const mjIdx = this.MJ_TO_IL[i];
       const q = this.data.qpos[this.jntQpos[mjIdx]];
       obs[9 + i] = q - this.defaultPos[i];
     }
@@ -271,17 +261,18 @@ export class Go2OnnxController {
       obs[37 + i] = this.lastAction[i];
     }
 
+    // Clip observations to prevent extreme values
+    for (let i = 0; i < 49; i++) {
+      obs[i] = Math.max(-100, Math.min(100, obs[i]));
+    }
+
     return obs;
   }
 
-  /**
-   * Apply PD control to track current position targets.
-   * Called every physics step.
-   */
   applyPD() {
     const ctrl = this.data.ctrl;
     for (let i = 0; i < 12; i++) {
-      const mjIdx = this.IL_TO_MJ[i]; // MuJoCo actuator for IL joint i
+      const mjIdx = this.IL_TO_MJ[i];
       const q = this.data.qpos[this.jntQpos[mjIdx]];
       const qdot = this.data.qvel[this.jntDof[mjIdx]];
       const target = this.currentTargets[i];
@@ -299,11 +290,6 @@ export class Go2OnnxController {
     }
   }
 
-  /**
-   * Main step function. Called every physics step (synchronous).
-   * Runs policy at decimated rate (async, fire-and-forget).
-   * Applies PD every step using latest targets.
-   */
   step() {
     if (!this.enabled) return;
 
@@ -326,10 +312,11 @@ export class Go2OnnxController {
       const results = await this.session.run({ obs: input });
       const actions = results.actions.data;
 
-      // Store raw actions and compute targets
+      // Clip actions to [-5, 5] (safety bound)
       for (let i = 0; i < 12; i++) {
-        this.lastAction[i] = actions[i];
-        this.currentTargets[i] = actions[i] * this.actionScale + this.defaultPos[i];
+        const a = Math.max(-5, Math.min(5, actions[i]));
+        this.lastAction[i] = a;
+        this.currentTargets[i] = a * this.actionScale + this.defaultPos[i];
       }
     } catch (e) {
       console.error('ONNX inference error:', e);
@@ -346,5 +333,6 @@ export class Go2OnnxController {
     this.forwardSpeed = 0;
     this.lateralSpeed = 0;
     this.turnRate = 0;
+    this._inferring = false;
   }
 }
